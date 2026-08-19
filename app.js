@@ -91,7 +91,7 @@ function layout(active, title, html){
     [["dash","Dashboard"],["users","Users Management"],["train","Training"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"]] :
     [["dash","Dashboard"],["train","My Trainings"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
-  app.innerHTML = `<aside class=side><div class=brand>🛡️ Safety Training & Learning Portal<small>Talwandi Sabo Thermal Limited</small></div><div class=nav>${menu.map(m=>`<button class="${active===m[0]?"active":""}" onclick="route('${m[0]}')">${m[1]}</button>`).join("")}</div><button class="btn light full" onclick=logout()>Logout</button></aside><main class=main><div class=top><h2>${title}</h2><div style="display:flex;align-items:center;gap:8px"><button class="btn light" style="padding:4px 10px;font-size:12px" onclick="changeMyPasswordModal()">🔑 Change Password</button><span class=chip>${esc(profile.name)} · ${admin?"Admin":"User"}</span></div></div>${html}</main>`;
+  app.innerHTML = `<aside class=side><div class=brand>🛡️ Safety Training & Learning Portal<small>Talwandi Sabo Thermal Plant</small></div><div class=nav>${menu.map(m=>`<button class="${active===m[0]?"active":""}" onclick="route('${m[0]}')">${m[1]}</button>`).join("")}</div><button class="btn light full" onclick=logout()>Logout</button></aside><main class=main><div class=top><h2>${title}</h2><div style="display:flex;align-items:center;gap:8px"><button class="btn light" style="padding:4px 10px;font-size:12px" onclick="changeMyPasswordModal()">🔑 Change Password</button><span class=chip>${esc(profile.name)} · ${admin?"Admin":"User"}</span></div></div>${html}</main>`;
 }
 
 function metric(a,b){
@@ -436,7 +436,7 @@ function addUserForm(){
           <div><label>Password *</label><input id=up type=password value="TSL@1234"></div>
           <div><label>Department</label><input id=ud placeholder="Electrical"></div>
           <div><label>Designation</label><input id=udes placeholder="Engineer"></div>
-          <div class=fullfield><label>Company</label><input id=uc value="Talwandi Sabo Thermal Limited"></div>
+          <div class=fullfield><label>Company</label><input id=uc value="Talwandi Sabo Thermal Plant"></div>
           <div>
             <label>Status</label>
             <select id=ustatus>
@@ -745,7 +745,7 @@ async function executeExcelImport(){
       let name = cleanExcelVal(row["Name"]);
       let dept = cleanExcelVal(row["Department"]);
       let desig = cleanExcelVal(row["Designation"]);
-      let comp = cleanExcelVal(row["Company"]) || "Talwandi Sabo Thermal Limited";
+      let comp = cleanExcelVal(row["Company"]) || "Talwandi Sabo Thermal Plant";
       let statusStr = cleanExcelVal(row["Status"]).toLowerCase();
       let emailVal = cleanExcelVal(row["Username/Email"]);
 
@@ -914,7 +914,7 @@ async function exportUsersToExcel(){
         "Name": "Sample Employee",
         "Department": "Electrical",
         "Designation": "Engineer",
-        "Company": "Talwandi Sabo Thermal Limited",
+        "Company": "Talwandi Sabo Thermal Plant",
         "Status": "Active",
         "Username/Email": "emp001@tsl.internal"
       }];
@@ -1908,7 +1908,7 @@ async function showCertificate(attemptId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL LIMITED</div>
+          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(a.profiles?.name||"")}</h2>
