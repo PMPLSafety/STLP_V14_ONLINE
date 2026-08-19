@@ -683,7 +683,7 @@ async function previewExcelImport(){
         <div class="modalbg" id="modal">
           <div class="modal" style="max-width:900px">
             <h2>Employee Import Preview</h2>
-            <p class="muted">Total Rows Detected: <b>${validRows.length}</b> (Showing first 10 rows preview)</p>
+            <p class="muted">Total Rows Detected: <b>${rows.length}</b> (Showing first 10 rows preview)</p>
             <div class="tablewrap" style="max-height:300px;overflow-y:auto;margin:15px 0">
               <table class="table">
                 <tr><th>Row</th><th>Emp ID</th><th>Name</th><th>Email</th><th>Dept</th><th>Desig</th><th>Company</th><th>Status</th></tr>
@@ -936,6 +936,60 @@ let userTrainingFilterKey = "ALL";
 let adminTrainingDetailsCache = null;
 let adminTrainingUserFilter = "ALL";
 
+function confirmDeleteTraining(id, title) {
+  if (profile.role !== "admin") return alert("Unauthorized action.");
+
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:450px">
+        <h2>Delete Training?</h2>
+        <p>Are you sure you want to permanently delete:</p>
+        <p style="font-size:16px;font-weight:bold;margin:12px 0;color:#1f4d3a">"${esc(title)}"?</p>
+        <p class="muted" style="font-size:13px">This action cannot be undone.</p>
+        <div class="actions" style="justify-content:flex-end;margin-top:18px">
+          <button class="btn light" onclick="closeModal()">Cancel</button>
+          <button class="btn red" style="background:#d32f2f;color:#fff" onclick="executeDeleteTraining('${id}')">Delete Permanently</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function executeDeleteTraining(id) {
+  if (profile.role !== "admin") return alert("Unauthorized action.");
+
+  // 1. Safe Record Check: Verify linked employee records before deleting
+  const [progCheck, attCheck] = await Promise.all([
+    sb.from("training_progress").select("id", { count: "exact", head: true }).eq("training_id", id),
+    sb.from("assessment_attempts").select("id", { count: "exact", head: true }).eq("training_id", id)
+  ]);
+
+  const hasProgress = (progCheck.count || 0) > 0;
+  const hasAttempts = (attCheck.count || 0) > 0;
+
+  if (hasProgress || hasAttempts) {
+    closeModal();
+    return alert("Training cannot be permanently deleted because it has linked employee/training records. Please Archive the training instead.");
+  }
+
+  // 2. Cleanup unattempted assessment questions (if any exist) to avoid foreign key errors
+  await sb.from("assessment_questions").delete().eq("training_id", id);
+
+  // 3. Perform database deletion
+  const r = await sb.from("trainings").delete().eq("id", id);
+
+  closeModal();
+
+  if (r.error) {
+    alert("Failed to delete training: " + r.error.message);
+    route("train");
+    return;
+  }
+
+  alert("Training deleted successfully.");
+  route("train");
+}
+
 async function training(){
   const admin = profile.role === "admin";
   
@@ -960,7 +1014,6 @@ async function training(){
     const draftCount = rows.filter(t => !t.published && !t.archived).length;
     const archivedCount = rows.filter(t => t.archived).length;
 
-    // Helper to calculate real user stats per training
     const getTrainingUserStats = (t) => {
       const tId = String(t.id || "").toLowerCase().trim();
       const tTitle = String(t.title || "").toLowerCase().trim();
@@ -1048,7 +1101,6 @@ async function training(){
     return layout("train", "Training Management", `
       <p class="muted">Create and manage training requirements, schedules & assigned employee metrics</p>
       
-      <!-- DASHBOARD SUMMARY CARDS -->
       <div class="grid" style="margin-bottom:20px">
         ${metric("Total Requirements", totalTrainingsCount)}
         ${metric("Published", publishedCount)}
@@ -1078,7 +1130,6 @@ async function training(){
                 <div>🕐 <b>Duration:</b> ${esc(t.duration||"1 Hour")}</div>
               </div>
 
-              <!-- REAL-TIME USER METRICS -->
               <div style="display:flex;gap:12px;font-size:12px;margin-top:10px;background:#f8f9fa;padding:8px 12px;border-radius:6px;width:fit-content">
                 <div>👥 <b>Assigned:</b> ${stats.assigned}</div>
                 <div style="color:#2e7d32">🟢 <b>Completed:</b> ${stats.completed}</div>
@@ -1093,6 +1144,7 @@ async function training(){
               <button class="btn light" onclick="togglePublish('${t.id}',${!t.published})">${t.published ? "Unpublish" : "Publish"}</button>
               <button class="btn light" onclick="toggleArchive('${t.id}',${!t.archived})">${t.archived ? "Unarchive" : "Archive"}</button>
               <button class="btn light" onclick="manageAssessment('${t.id}')">Assessment</button>
+              <button class="btn light" style="color:#d32f2f;border-color:#f8d7da" onclick="confirmDeleteTraining('${t.id}', '${esc(t.title)}')">Delete</button>
             </div>
           </div>
         `;
@@ -1249,10 +1301,6 @@ async function viewTrainingDetailsModal(trainingId) {
   let completeCount = 0;
   let pendingCount = 0;
   let expiredCount = 0;
-  let missingCount = 0;
-
-  const tId = String(t.id || "").toLowerCase().trim();
-  const tTitle = String(t.title || "").toLowerCase().trim();
 
   const userStatusList = employees.map(emp => {
     const empUuid = String(emp.id || "").toLowerCase().trim();
@@ -1337,7 +1385,6 @@ async function viewTrainingDetailsModal(trainingId) {
         <h2>${esc(t.title)} — Training Details</h2>
         <p class="muted">${esc(t.category||"General")} · Duration: ${esc(t.duration||"1 Hour")} · Validity: ${esc(t.validity||"1 Year")}</p>
         
-        <!-- METRICS -->
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:10px;margin:15px 0">
           <div class="card" style="padding:10px">👥 <b>Total Assigned:</b> ${employees.length}</div>
           <div class="card" style="padding:10px;color:#2e7d32">🟢 <b>Complete:</b> ${completeCount}</div>
@@ -1351,7 +1398,6 @@ async function viewTrainingDetailsModal(trainingId) {
           <div>Passing Marks: <b>${t.passing_marks||90}%</b></div>
         </div>
 
-        <!-- FILTER TABS -->
         <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
           <button id="trUserFAll" class="btn blue" onclick="filterTrainingUsersList('ALL')">All (${employees.length})</button>
           <button id="trUserFComp" class="btn light" onclick="filterTrainingUsersList('COMPLETE')">Complete (${completeCount})</button>
@@ -1359,7 +1405,6 @@ async function viewTrainingDetailsModal(trainingId) {
           <button id="trUserFExp" class="btn light" onclick="filterTrainingUsersList('EXPIRED')">Expired (${expiredCount})</button>
         </div>
 
-        <!-- USER LIST TABLE -->
         <div class="tablewrap" style="max-height:300px;overflow-y:auto;margin-bottom:15px">
           <table class="table" id="trainingUsersDetailsTable">
             <thead>
