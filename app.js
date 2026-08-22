@@ -36,7 +36,7 @@ function validateEmail(email) {
 }
 
 function loginPage(msg=""){
-  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Talwandi Sabo Thermal Limited</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
+  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Talwandi Sabo Thermal Plant</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
 }
 
 async function login(){
@@ -85,38 +85,397 @@ async function logout(){
   loginPage();
 }
 
+const MENU_ICONS = {
+  dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
+  progress:"📈", reports:"📄", history:"🕒"
+};
+
+let _clockTimer = null;
+function _sidebarCollapsedPref(){ return localStorage.getItem("stlp_sidebar_collapsed") === "1"; }
+function toggleSidebar(){
+  const side = $("sideEl"), main = $("mainEl");
+  const nowCollapsed = !side.classList.contains("collapsed");
+  side.classList.toggle("collapsed", nowCollapsed);
+  main.classList.toggle("collapsed", nowCollapsed);
+  localStorage.setItem("stlp_sidebar_collapsed", nowCollapsed ? "1" : "0");
+}
+function toggleMobileSidebar(){
+  $("sideEl")?.classList.toggle("mobile-open");
+  $("sideScrim")?.classList.toggle("show");
+}
+
 function layout(active, title, html){
   let admin = profile.role === "admin";
-  let menu = admin ? 
+  let menu = admin ?
     [["dash","Dashboard"],["users","Users Management"],["train","Training"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"]] :
     [["dash","Dashboard"],["train","My Trainings"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
-  app.innerHTML = `<aside class=side><div class=brand>🛡️ Safety Training & Learning Portal<small>Talwandi Sabo Thermal Plant</small></div><div class=nav>${menu.map(m=>`<button class="${active===m[0]?"active":""}" onclick="route('${m[0]}')">${m[1]}</button>`).join("")}</div><button class="btn light full" onclick=logout()>Logout</button></aside><main class=main><div class=top><h2>${title}</h2><div style="display:flex;align-items:center;gap:8px"><button class="btn light" style="padding:4px 10px;font-size:12px" onclick="changeMyPasswordModal()">🔑 Change Password</button><span class=chip>${esc(profile.name)} · ${admin?"Admin":"User"}</span></div></div>${html}</main>`;
+  const collapsed = _sidebarCollapsedPref();
+  const initials = (profile.name||"?").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase();
+
+  app.innerHTML = `
+    <div class="side-scrim" id="sideScrim" onclick="toggleMobileSidebar()"></div>
+    <aside class="side${collapsed?" collapsed":""}" id="sideEl">
+      <button class="side-toggle" onclick="toggleSidebar()" title="Collapse sidebar">${collapsed?"›":"‹"}</button>
+      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Talwandi Sabo Thermal Plant</small></span></div>
+      <div class="nav">${menu.map(m=>`<button class="${active===m[0]?"active":""}" data-tip="${esc(m[1])}" onclick="route('${m[0]}')"><span class="ico">${MENU_ICONS[m[0]]||"•"}</span><span class="lbl">${esc(m[1])}</span></button>`).join("")}</div>
+      <div class="sidebar-foot"><button class="btn light full" onclick="logout()">🚪 <span class="lbl-logout">Logout</span></button></div>
+    </aside>
+    <main class="main${collapsed?" collapsed":""}" id="mainEl">
+      <div class="top">
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="mobile-menu-btn" onclick="toggleMobileSidebar()">☰</button>
+          <div><span class="eyebrow">${admin?"Administrator":"Employee"} Portal</span><h2>${esc(title)}</h2></div>
+        </div>
+        <div class="top-right">
+          <div class="clock" id="topClock"><span class="t">--:--:--</span><span class="d">--</span></div>
+          <button class="btn light" style="padding:9px 12px;font-size:12px" onclick="changeMyPasswordModal()">🔑 Change Password</button>
+          <span class="chip"><span class="avatar">${esc(initials||"U")}</span>${esc(profile.name)}<span class="role-tag">${admin?"ADMIN":"USER"}</span></span>
+        </div>
+      </div>
+      <div class="content-pad">${html}</div>
+    </main>`;
+
+  _startClock();
+}
+
+function _startClock(){
+  if(_clockTimer) clearInterval(_clockTimer);
+  const tick = () => {
+    const el = $("topClock");
+    if(!el){ clearInterval(_clockTimer); return; }
+    const now = new Date();
+    el.querySelector(".t").textContent = now.toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    el.querySelector(".d").textContent = now.toLocaleDateString("en-IN",{weekday:"short",day:"2-digit",month:"short",year:"numeric"});
+  };
+  tick();
+  _clockTimer = setInterval(tick, 1000);
 }
 
 function metric(a,b){
   return `<div class=card><span class=muted>${a}</span><strong style="font-size:28px;display:block;margin-top:7px">${b}</strong></div>`;
 }
 
+function kpi(icon, colorClass, label, value, sub){
+  return `<div class="kpi ${colorClass}"><span class="ico">${icon}</span><span class="val">${value}</span><span class="lbl">${esc(label)}</span>${sub?`<span class="sub">${esc(sub)}</span>`:""}</div>`;
+}
+
+let _dashCharts = {};
+function _destroyDashCharts(){
+  Object.values(_dashCharts).forEach(c => { try{ c.destroy(); }catch(e){} });
+  _dashCharts = {};
+}
+
+const CHART_PALETTE = {
+  teal:"#12979f", navy:"#15426e", amber:"#e8912c", green:"#1f9d55",
+  red:"#d64545", purple:"#7c5cd6", blue:"#3d8fd6", slate:"#c9d4e0"
+};
+
+// Build a per-employee x per-training compliance matrix from existing tables/logic.
+// Mirrors the calculation already used in the Progress module so figures stay consistent.
+function _buildComplianceMatrix(employees, activeTrainings, attempts, progresses){
+  const now = new Date();
+  const getItemStatus = (emp, training) => {
+    if(!training) return "MISSING";
+    const empUuid = String(emp.id||"").toLowerCase().trim();
+    const empCode = String(emp.employee_id||"").toLowerCase().trim();
+    const empUser = String(emp.username||"").toLowerCase().trim();
+    const tId = String(training.id||"").toLowerCase().trim();
+    const tTitle = String(training.title||"").toLowerCase().trim();
+    const matchUser = (rec) => {
+      if(!rec) return false;
+      const uVal = String(rec.user_id||rec.employee_id||rec.username||"").toLowerCase().trim();
+      if(!uVal) return false;
+      return uVal===empUuid || (empCode!==""&&uVal===empCode) || (empUser!==""&&uVal===empUser);
+    };
+    const matchTraining = (rec) => {
+      if(!rec) return false;
+      const recTId = String(rec.training_id||rec.training_title||"").toLowerCase().trim();
+      const recRelTitle = String(rec.trainings?.title||"").toLowerCase().trim();
+      return (recTId!==""&&recTId===tId) || (tTitle!==""&&recTId===tTitle) || (tTitle!==""&&recRelTitle===tTitle);
+    };
+    const userAttempts = attempts.filter(a=>matchUser(a)&&matchTraining(a));
+    const passedAttempt = userAttempts.find(a=>
+      a.passed===true || String(a.passed).toLowerCase()==='true' || a.passed===1 ||
+      (a.score!==undefined && a.score!==null && training.passing_marks && Number(a.score)>=Number(training.passing_marks))
+    );
+    const prog = progresses.find(p=>matchUser(p)&&matchTraining(p));
+    const isCompletedProg = prog && (prog.status==='completed' || String(prog.status).toLowerCase()==='completed');
+    if(passedAttempt || isCompletedProg){
+      let completionDate = null;
+      if(passedAttempt && passedAttempt.created_at) completionDate = new Date(passedAttempt.created_at);
+      else if(prog && (prog.updated_at||prog.created_at)) completionDate = new Date(prog.updated_at||prog.created_at);
+      if(completionDate && !isNaN(completionDate.getTime()) && training.validity){
+        const valStr = String(training.validity).toLowerCase().trim();
+        const numMatch = valStr.match(/\d+/);
+        const num = numMatch ? parseInt(numMatch[0],10) : 1;
+        const expiryDate = new Date(completionDate.getTime());
+        if(valStr.includes("month")) expiryDate.setMonth(expiryDate.getMonth()+num);
+        else if(valStr.includes("day")) expiryDate.setDate(expiryDate.getDate()+num);
+        else expiryDate.setFullYear(expiryDate.getFullYear()+num);
+        if(now>expiryDate) return "EXPIRED";
+      }
+      return "COMPLETE";
+    }
+    return "PENDING";
+  };
+
+  let totals = {COMPLETE:0, PENDING:0, EXPIRED:0, MISSING:0};
+  const matrixData = employees.map(emp=>{
+    let cnt = {COMPLETE:0, PENDING:0, EXPIRED:0, MISSING:0};
+    activeTrainings.forEach(t=>{ cnt[getItemStatus(emp,t)]++; });
+    const totalReqs = activeTrainings.length;
+    const progressPct = totalReqs>0 ? Math.round((cnt.COMPLETE/totalReqs)*100) : 0;
+    let overallStatus = "COMPLETE";
+    if(totalReqs===0) overallStatus="COMPLETE";
+    else if(cnt.EXPIRED>0) overallStatus="EXPIRED";
+    else if(cnt.PENDING>0) overallStatus="PENDING";
+    else if(cnt.MISSING>0 && cnt.COMPLETE<totalReqs) overallStatus="MISSING";
+    totals[overallStatus] = (totals[overallStatus]||0)+1;
+    return {department: emp.department||"Unassigned", progressPct, overallStatus};
+  });
+  return {matrixData, totals};
+}
+
+function _gaugeSVG(pct){
+  pct = Math.max(0, Math.min(100, Math.round(pct)));
+  const color = pct>=90 ? CHART_PALETTE.green : pct>=70 ? CHART_PALETTE.amber : CHART_PALETTE.red;
+  const r=70, full=Math.PI*r, dash=(pct/100)*full;
+  return `<svg viewBox="0 0 180 100">
+    <path d="M10,95 A70,70 0 0 1 170,95" fill="none" stroke="#e1e8f0" stroke-width="16" stroke-linecap="round"/>
+    <path d="M10,95 A70,70 0 0 1 170,95" fill="none" stroke="${color}" stroke-width="16" stroke-linecap="round"
+      stroke-dasharray="${dash.toFixed(1)} ${full.toFixed(1)}"/>
+  </svg>`;
+}
+
+function _monthKey(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; }
+function _lastNMonths(n){
+  const out=[]; const now=new Date();
+  for(let i=n-1;i>=0;i--){ const d=new Date(now.getFullYear(), now.getMonth()-i, 1); out.push({key:_monthKey(d), label:d.toLocaleDateString("en-IN",{month:"short"})}); }
+  return out;
+}
+
+function _renderHeatmap(attempts){
+  const days = 84; // 12 weeks
+  const now = new Date(); now.setHours(0,0,0,0);
+  const counts = {};
+  attempts.forEach(a=>{
+    if(!a.created_at) return;
+    const d = new Date(a.created_at); d.setHours(0,0,0,0);
+    const diff = Math.round((now-d)/86400000);
+    if(diff>=0 && diff<days){
+      const key = d.toISOString().slice(0,10);
+      counts[key] = (counts[key]||0)+1;
+    }
+  });
+  let max = 1;
+  Object.values(counts).forEach(v=>{ if(v>max) max=v; });
+  const cells = [];
+  for(let i=days-1;i>=0;i--){
+    const d = new Date(now.getTime()-i*86400000);
+    const key = d.toISOString().slice(0,10);
+    const c = counts[key]||0;
+    let lvl = 0;
+    if(c>0){ const ratio=c/max; lvl = ratio>0.75?4 : ratio>0.5?3 : ratio>0.25?2 : 1; }
+    cells.push(`<i data-lvl="${lvl}" title="${key} · ${c} activity"></i>`);
+  }
+  const hasActivity = Object.keys(counts).length>0;
+  if(!hasActivity){
+    return `<div class="chart-empty">No assessment activity recorded yet.</div>`;
+  }
+  return `<div class="heatmap-scroll"><div class="heatmap">${cells.join("")}</div></div>
+    <div class="heatmap-legend">Less <i data-lvl="0" style="background:#eef2f7"></i><i data-lvl="1" style="background:#bfe9df"></i><i data-lvl="2" style="background:#7ed0c2"></i><i data-lvl="3" style="background:#3bb0a3"></i><i data-lvl="4" style="background:#0e7c86"></i> More</div>`;
+}
+
 async function dash(){
   if(profile.role==="admin"){
-    const [u, t, p, a] = await Promise.all([
-      sb.from("profiles").select("*",{count:"exact",head:true}).eq("role","user"),
-      sb.from("trainings").select("*",{count:"exact",head:true}).eq("archived",false),
-      sb.from("training_progress").select("*",{count:"exact",head:true}).eq("status","completed"),
-      sb.from("assessment_attempts").select("*",{count:"exact",head:true})
+    const [uRes, tRes, attRes, progRes] = await Promise.all([
+      sb.from("profiles").select("*").eq("role","user"),
+      sb.from("trainings").select("*"),
+      sb.from("assessment_attempts").select("*"),
+      sb.from("training_progress").select("*")
     ]);
 
-    let completedCount = p.count || 0;
-    if(completedCount === 0){
-      const passedAtt = await sb.from("assessment_attempts").select("user_id, training_id").eq("passed", true);
-      if(passedAtt.data && passedAtt.data.length > 0){
-        const uniqueSet = new Set(passedAtt.data.map(x => `${x.user_id}_${x.training_id}`));
-        completedCount = uniqueSet.size;
-      }
+    const employees = uRes.data || [];
+    const allTrainings = tRes.data || [];
+    const attempts = attRes.data || [];
+    const progresses = progRes.data || [];
+    const activeTrainings = allTrainings.filter(t=>t.archived!==true);
+    const publishedTrainings = allTrainings.filter(t=>t.published && !t.archived);
+
+    // Completed count — same fallback logic previously used on this dashboard
+    let completedCount = progresses.filter(p=>p.status==="completed").length;
+    if(completedCount===0){
+      const uniqueSet = new Set(attempts.filter(a=>a.passed===true).map(x=>`${x.user_id}_${x.training_id}`));
+      completedCount = uniqueSet.size;
     }
 
-    layout("dash","Admin Dashboard",`<div class=grid>${metric("Users",u.count||0)}${metric("Trainings",t.count||0)}${metric("Completed",completedCount)}${metric("Assessments",a.count||0)}</div><div class=card style="margin-top:16px"><h3>Welcome</h3><p class=muted>Use Users Management to add, import, edit or delete portal employees.</p></div>`);
+    const {matrixData, totals} = _buildComplianceMatrix(employees, activeTrainings, attempts, progresses);
+    const overallCompliancePct = employees.length>0 ? Math.round((totals.COMPLETE/employees.length)*100) : 0;
+
+    // Department-wise compliance (average progress % per department)
+    const deptMap = {};
+    matrixData.forEach(m=>{
+      if(!deptMap[m.department]) deptMap[m.department] = {sum:0, n:0};
+      deptMap[m.department].sum += m.progressPct;
+      deptMap[m.department].n += 1;
+    });
+    const deptLabels = Object.keys(deptMap).sort();
+    const deptValues = deptLabels.map(d=>Math.round(deptMap[d].sum/deptMap[d].n));
+
+    // Certificate status — derived from actual assessment attempts per user/training
+    let certCertified=0, certFailed=0, certNotAttempted=0;
+    const requiredTrainings = publishedTrainings.filter(t=>t.assessment_required);
+    if(requiredTrainings.length>0 && employees.length>0){
+      employees.forEach(emp=>{
+        requiredTrainings.forEach(t=>{
+          const uVal = (r)=>String(r.user_id||"").toLowerCase().trim();
+          const empId = String(emp.id||"").toLowerCase().trim();
+          const userAtt = attempts.filter(a=>uVal(a)===empId && String(a.training_id)===String(t.id));
+          if(userAtt.length===0) certNotAttempted++;
+          else if(userAtt.some(a=>a.passed===true)) certCertified++;
+          else certFailed++;
+        });
+      });
+    }
+
+    // Monthly training completion trend (last 6 months, based on passed attempts)
+    const months = _lastNMonths(6);
+    const monthlyCompletions = months.map(m=>
+      attempts.filter(a=>a.passed===true && a.created_at && _monthKey(new Date(a.created_at))===m.key).length
+    );
+
+    // Assessment score trend (average score per month, last 6 months)
+    const monthlyScores = months.map(m=>{
+      const inMonth = attempts.filter(a=>a.created_at && _monthKey(new Date(a.created_at))===m.key && a.score!==null && a.score!==undefined);
+      if(inMonth.length===0) return null;
+      return Math.round(inMonth.reduce((s,a)=>s+Number(a.score||0),0)/inMonth.length);
+    });
+    const hasScoreData = monthlyScores.some(v=>v!==null);
+
+    const html = `
+      <div class="kpi-grid">
+        ${kpi("👥","c1","Total Employees",employees.length)}
+        ${kpi("📚","c6","Active Trainings",activeTrainings.length,`${publishedTrainings.length} published`)}
+        ${kpi("✅","c3","Completed",completedCount)}
+        ${kpi("📝","c2","Assessments Taken",attempts.length)}
+        ${kpi("🎓","c5","Certificates Issued",certCertified)}
+        ${kpi("📊","c4","Overall Compliance",overallCompliancePct+"%")}
+      </div>
+
+      <div class="chart-row cols-2" style="margin-top:22px">
+        <div class="chart-card">
+          <h4>📈 Monthly Training Completion</h4>
+          <span class="chart-sub">Passed assessments by month · last 6 months</span>
+          <div class="chart-box"><canvas id="chLine"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <h4>🟢 Compliance Overview</h4>
+          <span class="chart-sub">Employee status across active trainings</span>
+          <div class="chart-box short"><canvas id="chPie"></canvas></div>
+        </div>
+      </div>
+
+      <div class="chart-row cols-2">
+        <div class="chart-card">
+          <h4>🏭 Department-wise Compliance</h4>
+          <span class="chart-sub">Average completion % by department</span>
+          <div class="chart-box">${deptLabels.length?'<canvas id="chBar"></canvas>':'<div class="chart-empty">No department data available yet.</div>'}</div>
+        </div>
+        <div class="chart-card">
+          <div class="gauge-wrap">
+            <h4 style="align-self:flex-start">🎯 Overall Compliance</h4>
+            <span class="chart-sub" style="align-self:flex-start">Employees fully compliant vs total workforce</span>
+            <div class="gauge">${_gaugeSVG(overallCompliancePct)}<div class="gauge-val"><span class="n">${overallCompliancePct}%</span><span class="l">Compliant</span></div></div>
+            <div class="gauge-legend"><span><i style="background:${CHART_PALETTE.green}"></i>≥90%</span><span><i style="background:${CHART_PALETTE.amber}"></i>70–89%</span><span><i style="background:${CHART_PALETTE.red}"></i>&lt;70%</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-row cols-2">
+        <div class="chart-card">
+          <h4>📉 Assessment Score Trend</h4>
+          <span class="chart-sub">Average score by month · last 6 months</span>
+          <div class="chart-box">${hasScoreData?'<canvas id="chArea"></canvas>':'<div class="chart-empty">No assessment score data available yet.</div>'}</div>
+        </div>
+        <div class="chart-card">
+          <h4>🎓 Certificate Status</h4>
+          <span class="chart-sub">Across published trainings requiring assessment</span>
+          <div class="chart-box short">${requiredTrainings.length?'<canvas id="chDonut"></canvas>':'<div class="chart-empty">No assessment-required trainings published yet.</div>'}</div>
+        </div>
+      </div>
+
+      <div class="chart-row cols-1" style="grid-template-columns:1fr">
+        <div class="chart-card">
+          <h4>🗓️ Training Activity Calendar</h4>
+          <span class="chart-sub">Assessment attempts per day · last 12 weeks</span>
+          ${_renderHeatmap(attempts)}
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px"><h3>Welcome</h3><p class="muted">Use Users Management to add, import, edit or delete portal employees.</p></div>
+    `;
+
+    layout("dash","Admin Dashboard", html);
+    _destroyDashCharts();
+
+    if(window.Chart){
+      Chart.defaults.font.family = "Inter, system-ui, sans-serif";
+      Chart.defaults.color = "#64748b";
+
+      const lineEl = $("chLine");
+      if(lineEl) _dashCharts.line = new Chart(lineEl, {
+        type:"line",
+        data:{ labels: months.map(m=>m.label), datasets:[{
+          label:"Completions", data: monthlyCompletions, borderColor: CHART_PALETTE.teal,
+          backgroundColor:"rgba(18,151,159,.12)", fill:true, tension:.35, pointRadius:3,
+          pointBackgroundColor: CHART_PALETTE.teal
+        }]},
+        options:{ plugins:{legend:{display:false}}, scales:{ y:{beginAtZero:true, ticks:{precision:0}, grid:{color:"#eef2f7"}}, x:{grid:{display:false}} }, maintainAspectRatio:false }
+      });
+
+      const pieEl = $("chPie");
+      if(pieEl) _dashCharts.pie = new Chart(pieEl, {
+        type:"pie",
+        data:{ labels:["Completed","Pending","Expired"], datasets:[{
+          data:[totals.COMPLETE, totals.PENDING+totals.MISSING, totals.EXPIRED],
+          backgroundColor:[CHART_PALETTE.green, CHART_PALETTE.amber, CHART_PALETTE.red],
+          borderWidth:2, borderColor:"#fff"
+        }]},
+        options:{ plugins:{legend:{position:"bottom", labels:{boxWidth:10, padding:14, font:{size:11}}}}, maintainAspectRatio:false }
+      });
+
+      const barEl = $("chBar");
+      if(barEl) _dashCharts.bar = new Chart(barEl, {
+        type:"bar",
+        data:{ labels: deptLabels, datasets:[{
+          label:"Compliance %", data: deptValues, backgroundColor: CHART_PALETTE.navy, borderRadius:6, maxBarThickness:38
+        }]},
+        options:{ plugins:{legend:{display:false}}, scales:{ y:{beginAtZero:true, max:100, grid:{color:"#eef2f7"}}, x:{grid:{display:false}} }, maintainAspectRatio:false }
+      });
+
+      const areaEl = $("chArea");
+      if(areaEl) _dashCharts.area = new Chart(areaEl, {
+        type:"line",
+        data:{ labels: months.map(m=>m.label), datasets:[{
+          label:"Avg Score", data: monthlyScores, borderColor: CHART_PALETTE.purple,
+          backgroundColor:"rgba(124,92,214,.15)", fill:true, tension:.35, spanGaps:true, pointRadius:3,
+          pointBackgroundColor: CHART_PALETTE.purple
+        }]},
+        options:{ plugins:{legend:{display:false}}, scales:{ y:{beginAtZero:true, max:100, grid:{color:"#eef2f7"}}, x:{grid:{display:false}} }, maintainAspectRatio:false }
+      });
+
+      const donutEl = $("chDonut");
+      if(donutEl) _dashCharts.donut = new Chart(donutEl, {
+        type:"doughnut",
+        data:{ labels:["Certified","Failed","Not Attempted"], datasets:[{
+          data:[certCertified, certFailed, certNotAttempted],
+          backgroundColor:[CHART_PALETTE.green, CHART_PALETTE.red, CHART_PALETTE.slate],
+          borderWidth:2, borderColor:"#fff"
+        }]},
+        options:{ cutout:"62%", plugins:{legend:{position:"bottom", labels:{boxWidth:10, padding:14, font:{size:11}}}}, maintainAspectRatio:false }
+      });
+    }
   } else {
     const [p, a, passedAtt] = await Promise.all([
       sb.from("training_progress").select("*",{count:"exact",head:true}).eq("user_id",profile.id).eq("status","completed"),
@@ -129,7 +488,7 @@ async function dash(){
       userCompleted = passedAtt.count;
     }
 
-    layout("dash","Welcome, "+esc(profile.name),`<div class=grid>${metric("Completed",userCompleted)}${metric("Assessments",a.count||0)}</div>`);
+    layout("dash","Welcome, "+esc(profile.name),`<div class="kpi-grid">${kpi("✅","c3","Completed",userCompleted)}${kpi("📝","c2","Assessments",a.count||0)}</div>`);
   }
 }
 
@@ -958,36 +1317,62 @@ function confirmDeleteTraining(id, title) {
 async function executeDeleteTraining(id) {
   if (profile.role !== "admin") return alert("Unauthorized action.");
 
-  // 1. Safe Record Check: Verify linked employee records before deleting
-  const [progCheck, attCheck] = await Promise.all([
-    sb.from("training_progress").select("id", { count: "exact", head: true }).eq("training_id", id),
-    sb.from("assessment_attempts").select("id", { count: "exact", head: true }).eq("training_id", id)
-  ]);
-
-  const hasProgress = (progCheck.count || 0) > 0;
-  const hasAttempts = (attCheck.count || 0) > 0;
-
-  if (hasProgress || hasAttempts) {
-    closeModal();
-    return alert("Training cannot be permanently deleted because it has linked employee/training records. Please Archive the training instead.");
-  }
-
-  // 2. Cleanup unattempted assessment questions (if any exist) to avoid foreign key errors
-  await sb.from("assessment_questions").delete().eq("training_id", id);
-
-  // 3. Perform database deletion
-  const r = await sb.from("trainings").delete().eq("id", id);
-
   closeModal();
 
-  if (r.error) {
-    alert("Failed to delete training: " + r.error.message);
-    route("train");
-    return;
-  }
+  try {
+    // 1. Linked Records Check (training_progress & assessment_attempts)
+    const [progCheck, attCheck] = await Promise.all([
+      sb.from("training_progress").select("id", { count: "exact", head: true }).eq("training_id", id),
+      sb.from("assessment_attempts").select("id", { count: "exact", head: true }).eq("training_id", id)
+    ]);
 
-  alert("Training deleted successfully.");
-  route("train");
+    if (progCheck.error) console.error("Progress check error:", progCheck.error);
+    if (attCheck.error) console.error("Attempts check error:", attCheck.error);
+
+    const hasProgress = (progCheck.count || 0) > 0;
+    const hasAttempts = (attCheck.count || 0) > 0;
+
+    if (hasProgress || hasAttempts) {
+      alert("Training cannot be permanently deleted because it has linked records. Please Archive the training instead.");
+      return;
+    }
+
+    // 2. Safely clean up associated assessment questions before deleting the training module
+    const qDelete = await sb.from("assessment_questions").delete().eq("training_id", id);
+    if (qDelete.error) {
+      console.error("Questions cleanup failed:", qDelete.error);
+      alert("Training could not be deleted due to associated questions: " + qDelete.error.message);
+      await route("train");
+      return;
+    }
+
+    // 3. Perform DELETE on trainings table and verify modified row count via .select()
+    const r = await sb.from("trainings").delete().eq("id", id).select();
+
+    if (r.error) {
+      console.error("Supabase DELETE error:", r.error);
+      alert("Training could not be deleted: " + r.error.message);
+      await route("train");
+      return;
+    }
+
+    // Strict validation: Check if 0 rows were affected (e.g. missing RLS delete policy or permission failure)
+    if (!r.data || r.data.length === 0) {
+      console.error("DELETE returned 0 modified rows. Verify RLS DELETE policy for 'trainings' table.");
+      alert("Training could not be deleted from database (0 rows affected). Please verify Supabase RLS DELETE permissions for the 'trainings' table.");
+      await route("train");
+      return;
+    }
+
+    // 4. Confirmed Success: Notify admin and re-fetch fresh training list from database
+    alert("Training deleted successfully.");
+    await route("train");
+
+  } catch (err) {
+    console.error("Unexpected error during training delete:", err);
+    alert("An unexpected error occurred while deleting training: " + (err.message || err));
+    await route("train");
+  }
 }
 
 async function training(){
@@ -1518,6 +1903,8 @@ function renderUserTrainingsCards() {
     let actionButtonHtml = "";
     if (t.computedStatus === "COMPLETED" && t.attemptId) {
       actionButtonHtml = `<button class="btn blue" onclick="showCertificate('${t.attemptId}')">View Certificate</button>`;
+    } else if (t.computedStatus === "COMPLETED" && !t.assessment_required) {
+      actionButtonHtml = `<button class="btn blue" onclick="showDeclarationCertificate('${t.id}')">View Certificate</button>`;
     } else if (t.computedStatus === "COMPLETED") {
       actionButtonHtml = `<button class="btn light" onclick="openTraining('${t.id}')">Review Material</button>`;
     } else {
@@ -1716,16 +2103,69 @@ async function openTraining(id){
     </div>`;
   }
 
+  // Declaration-based completion — only for trainings that do not have an assessment,
+  // since without an assessment there was previously no way to mark them completed.
+  let declaration = "";
+  if(!t.assessment_required){
+    const pr = await sb.from("training_progress").select("*").eq("training_id",id).eq("user_id",profile.id).order("created_at",{ascending:false}).limit(1);
+    const prog = (pr.data||[])[0];
+    const isDone = prog && (prog.status==="completed" || String(prog.status).toLowerCase()==="completed");
+    if(isDone){
+      const doneDate = prog.updated_at || prog.created_at;
+      declaration = `<div class="card" style="margin-top:16px;border-left:4px solid var(--green-600,#1f9d55)">
+        <h3>✅ Training Completed</h3>
+        <p class="muted">You declared this training read and completed${doneDate ? " on "+new Date(doneDate).toLocaleDateString("en-IN") : ""}.</p>
+        <button class="btn blue" onclick="showDeclarationCertificate('${id}')">View Certificate</button>
+      </div>`;
+    } else {
+      declaration = `<div class="card" style="margin-top:16px">
+        <h3>Declaration</h3>
+        <label style="display:flex;align-items:flex-start;gap:10px;font-weight:500;margin:10px 0">
+          <input type="checkbox" id="declareCheck" style="width:auto;margin-top:3px" onchange="$('declareBtn').disabled=!this.checked">
+          <span>I confirm that I have read and gone through this training material carefully and understood its content.</span>
+        </label>
+        <button id="declareBtn" class="btn blue" disabled onclick="markTrainingComplete('${id}')">OK · Mark Training as Complete</button>
+      </div>`;
+    }
+  }
+
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:1000px">
         <h2>${esc(t.title)}</h2>
         <p>${esc(t.description||"")}</p>
-        ${material}${assess}
+        ${material}${assess}${declaration}
         <div class="actions"><button class="btn light" onclick="closeModal()">Close</button></div>
       </div>
     </div>
   `);
+}
+
+async function markTrainingComplete(trainingId){
+  const chk = $("declareCheck");
+  if(!chk || !chk.checked){
+    return alert("Please tick the declaration checkbox to confirm you have read the training material.");
+  }
+  const btn = $("declareBtn");
+  if(btn){ btn.disabled = true; btn.textContent = "Saving..."; }
+
+  const existing = await sb.from("training_progress").select("id").eq("training_id",trainingId).eq("user_id",profile.id).limit(1);
+
+  // Note: training_progress has no updated_at column (see README V8 fix) — only status/created_at are written.
+  let r;
+  if(existing.data && existing.data.length){
+    r = await sb.from("training_progress").update({ status:"completed" }).eq("id", existing.data[0].id);
+  } else {
+    r = await sb.from("training_progress").insert({ training_id: trainingId, user_id: profile.id, status:"completed" });
+  }
+
+  if(r.error){
+    if(btn){ btn.disabled = false; btn.textContent = "OK · Mark Training as Complete"; }
+    return alert(r.error.message);
+  }
+
+  closeModal();
+  showDeclarationCertificate(trainingId);
 }
 
 // --- ASSESSMENT MODULE ---
@@ -1924,6 +2364,47 @@ async function showCertificate(attemptId){
         <div class="actions" style="justify-content:center;margin-top:15px">
           <button class="btn blue" onclick="printCertificate()">Print / Save PDF</button>
           <button class="btn light" onclick="closeModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+// Certificate for trainings completed via the read-and-declare flow (no assessment attached).
+async function showDeclarationCertificate(trainingId){
+  closeModal();
+  const [tRes, pRes] = await Promise.all([
+    sb.from("trainings").select("title").eq("id",trainingId).single(),
+    sb.from("training_progress").select("id,created_at,updated_at").eq("training_id",trainingId).eq("user_id",profile.id).order("created_at",{ascending:false}).limit(1)
+  ]);
+
+  if(tRes.error) return alert(tRes.error.message);
+  const prog = (pRes.data||[])[0];
+  if(!prog) return alert("No completion record found for this training yet.");
+
+  const dateVal = prog.updated_at || prog.created_at;
+  const certNo = "STLP-" + String(prog.id).replace(/-/g,"").substring(0,10).toUpperCase();
+
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:900px">
+        <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
+          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
+          <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
+          <p>This is to certify that</p>
+          <h2 style="font-size:28px;margin:10px 0">${esc(profile.name||"")}</h2>
+          <p>Employee ID: <b>${esc(profile.employee_id||"-")}</b></p>
+          <p>has successfully completed training</p>
+          <h2>${esc(tRes.data.title||"")}</h2>
+          <p class="muted">Completed via read &amp; declaration acknowledgement</p>
+          <div style="display:flex;justify-content:space-between;margin-top:40px;font-size:12px">
+            <div>Cert No: <b>${certNo}</b></div>
+            <div>Date: <b>${dateVal ? new Date(dateVal).toLocaleDateString("en-IN") : "-"}</b></div>
+          </div>
+        </div>
+        <div class="actions" style="justify-content:center;margin-top:15px">
+          <button class="btn blue" onclick="printCertificate()">Print / Save PDF</button>
+          <button class="btn light" onclick="closeModal();training()">Close</button>
         </div>
       </div>
     </div>
