@@ -87,7 +87,7 @@ async function logout(){
 
 const MENU_ICONS = {
   dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
-  progress:"📈", reports:"📄", history:"🕒"
+  progress:"📈", reports:"📄", history:"🕒", feedback:"💬"
 };
 
 let _clockTimer = null;
@@ -107,7 +107,7 @@ function toggleMobileSidebar(){
 function layout(active, title, html){
   let admin = profile.role === "admin";
   let menu = admin ?
-    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"]] :
+    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"],["feedback","Feedback"]] :
     [["dash","Dashboard"],["train","My Trainings"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
   const collapsed = _sidebarCollapsedPref();
@@ -2337,7 +2337,7 @@ async function submitAssessment(trainingId){
 async function showCertificate(attemptId){
   closeModal();
   const r = await sb.from("assessment_attempts")
-    .select("id,score,passed,created_at,trainings(title),profiles(name,employee_id)")
+    .select("id,training_id,score,passed,created_at,trainings(title),profiles(name,employee_id)")
     .eq("id",attemptId).single();
 
   if(r.error) return alert(r.error.message);
@@ -2363,7 +2363,7 @@ async function showCertificate(attemptId){
         </div>
         <div class="actions" style="justify-content:center;margin-top:15px">
           <button class="btn blue" onclick="printCertificate()">Print / Save PDF</button>
-          <button class="btn light" onclick="closeModal()">Close</button>
+          <button class="btn light" onclick="maybeShowFeedback('${a.training_id}')">Close</button>
         </div>
       </div>
     </div>
@@ -2375,14 +2375,15 @@ async function showDeclarationCertificate(trainingId){
   closeModal();
   const [tRes, pRes] = await Promise.all([
     sb.from("trainings").select("title").eq("id",trainingId).single(),
-    sb.from("training_progress").select("id,created_at,updated_at").eq("training_id",trainingId).eq("user_id",profile.id).order("created_at",{ascending:false}).limit(1)
+    sb.from("training_progress").select("id,created_at").eq("training_id",trainingId).eq("user_id",profile.id).order("created_at",{ascending:false}).limit(1)
   ]);
 
   if(tRes.error) return alert(tRes.error.message);
+  if(pRes.error) return alert(pRes.error.message);
   const prog = (pRes.data||[])[0];
   if(!prog) return alert("No completion record found for this training yet.");
 
-  const dateVal = prog.updated_at || prog.created_at;
+  const dateVal = prog.created_at;
   const certNo = "STLP-" + String(prog.id).replace(/-/g,"").substring(0,10).toUpperCase();
 
   document.body.insertAdjacentHTML("beforeend", `
@@ -2404,7 +2405,7 @@ async function showDeclarationCertificate(trainingId){
         </div>
         <div class="actions" style="justify-content:center;margin-top:15px">
           <button class="btn blue" onclick="printCertificate()">Print / Save PDF</button>
-          <button class="btn light" onclick="closeModal();training()">Close</button>
+          <button class="btn light" onclick="maybeShowFeedback('${trainingId}', true)">Close</button>
         </div>
       </div>
     </div>
@@ -2419,6 +2420,218 @@ function printCertificate(){
   w.document.close();
   w.focus();
   setTimeout(()=>w.print(),400);
+}
+
+// --- FEEDBACK MODULE ---
+// Feedback popup shown once, right after a user first views their certificate for a
+// completed training (assessment-passed or declaration-based). If feedback was already
+// given for this training, re-viewing the certificate later no longer prompts again.
+let _feedbackStarSel = 0;
+
+async function maybeShowFeedback(trainingId, thenGoToTraining){
+  closeModal();
+  const existing = await sb.from("training_feedback").select("id").eq("training_id",trainingId).eq("user_id",profile.id).limit(1);
+  if(existing.error){
+    // If the check itself fails, don't block the user's normal flow.
+    if(thenGoToTraining) training();
+    return;
+  }
+  if(existing.data && existing.data.length){
+    if(thenGoToTraining) training();
+    return;
+  }
+  showFeedbackPopup(trainingId, thenGoToTraining);
+}
+
+async function showFeedbackPopup(trainingId, thenGoToTraining){
+  const tr = await sb.from("trainings").select("title").eq("id",trainingId).single();
+  const tTitle = tr.data?.title || "";
+  _feedbackStarSel = 0;
+
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:520px">
+        <h2>Training Feedback</h2>
+        <p class="muted">${esc(tTitle)}</p>
+        <p>Please rate this training *</p>
+        <div id="fbStars" style="font-size:34px;letter-spacing:6px;cursor:pointer;margin:8px 0 18px">
+          ${[1,2,3,4,5].map(n=>`<span data-n="${n}" onclick="setFeedbackStar(${n})" style="color:#d9d9d9">★</span>`).join("")}
+        </div>
+        <label>Comments (optional)</label>
+        <textarea id="fbComments" rows="4" placeholder="Any suggestions or comments about this training..."></textarea>
+        <div class="actions" style="margin-top:15px">
+          <button class="btn blue" onclick="submitFeedback('${trainingId}', ${thenGoToTraining ? "true" : "false"})">Submit Feedback</button>
+          <button class="btn light" onclick="skipFeedback(${thenGoToTraining ? "true" : "false"})">Skip</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+function setFeedbackStar(n){
+  _feedbackStarSel = n;
+  document.querySelectorAll("#fbStars span").forEach(s => {
+    s.style.color = parseInt(s.dataset.n) <= n ? "#e8912c" : "#d9d9d9";
+  });
+}
+
+function skipFeedback(thenGoToTraining){
+  closeModal();
+  if(thenGoToTraining) training();
+}
+
+async function submitFeedback(trainingId, thenGoToTraining){
+  if(!_feedbackStarSel){
+    return alert("Please select a star rating before submitting.");
+  }
+  const btn = document.querySelector("#modal .btn.blue");
+  if(btn){ btn.disabled = true; btn.textContent = "Submitting..."; }
+
+  const r = await sb.from("training_feedback").insert({
+    training_id: trainingId,
+    user_id: profile.id,
+    rating: _feedbackStarSel,
+    comments: ($("fbComments")?.value || "").trim() || null
+  });
+
+  if(r.error){
+    if(btn){ btn.disabled = false; btn.textContent = "Submit Feedback"; }
+    return alert(r.error.message);
+  }
+
+  closeModal();
+  if(thenGoToTraining) training();
+}
+
+async function feedbackPage(){
+  const [fRes, tRes, uRes] = await Promise.all([
+    sb.from("training_feedback").select("*, trainings(title), profiles(name,employee_id)").order("created_at",{ascending:false}),
+    sb.from("trainings").select("id,title").order("title",{ascending:true}),
+    sb.from("profiles").select("id,name,employee_id").eq("role","user").order("name",{ascending:true})
+  ]);
+
+  if(fRes.error) return layout("feedback","Feedback",`<div class="card"><b>Error:</b> ${esc(fRes.error.message)}</div>`);
+
+  window._feedbackCache = fRes.data || [];
+  const trainingsList = tRes.data || [];
+  const usersList = uRes.data || [];
+
+  const total = window._feedbackCache.length;
+  const avgRating = total ? (window._feedbackCache.reduce((s,f)=>s+(f.rating||0),0)/total).toFixed(1) : "-";
+
+  layout("feedback","Feedback",`
+    <div class="grid" style="margin-bottom:20px">
+      ${metric("Total Feedback", total)}
+      ${metric("Average Rating", total ? avgRating+" / 5" : "-")}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;padding:16px">
+      <h3 style="margin-top:0;margin-bottom:12px;font-size:16px">Filters</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:12px;align-items:end">
+        <div>
+          <label style="font-size:12px;font-weight:bold">Search Keyword</label>
+          <input id="fbSearch" placeholder="Search user, training, comments..." oninput="renderFeedbackTable()" style="width:100%;margin:4px 0 0">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Training</label>
+          <select id="fbFilterTraining" onchange="renderFeedbackTable()" style="width:100%;margin:4px 0 0">
+            <option value="ALL">All Trainings</option>
+            ${trainingsList.map(t=>`<option value="${t.id}">${esc(t.title)}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">User</label>
+          <select id="fbFilterUser" onchange="renderFeedbackTable()" style="width:100%;margin:4px 0 0">
+            <option value="ALL">All Users</option>
+            ${usersList.map(u=>`<option value="${u.id}">${esc(u.name)} (${esc(u.employee_id||"-")})</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Rating</label>
+          <select id="fbFilterRating" onchange="renderFeedbackTable()" style="width:100%;margin:4px 0 0">
+            <option value="ALL">All Ratings</option>
+            ${[5,4,3,2,1].map(n=>`<option value="${n}">${n} Star${n>1?"s":""}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Date From</label>
+          <input type="date" id="fbFilterDateFrom" onchange="renderFeedbackTable()" style="width:100%;margin:4px 0 0">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Date To</label>
+          <input type="date" id="fbFilterDateTo" onchange="renderFeedbackTable()" style="width:100%;margin:4px 0 0">
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:16px">
+      <div id="feedbackTableContent"></div>
+    </div>
+  `);
+
+  renderFeedbackTable();
+}
+
+function renderFeedbackTable(){
+  const container = $("feedbackTableContent");
+  if(!container) return;
+
+  const searchQ = ($("fbSearch")?.value || "").toLowerCase().trim();
+  const trainingF = $("fbFilterTraining")?.value || "ALL";
+  const userF = $("fbFilterUser")?.value || "ALL";
+  const ratingF = $("fbFilterRating")?.value || "ALL";
+  const dateFromVal = $("fbFilterDateFrom")?.value || "";
+  const dateToVal = $("fbFilterDateTo")?.value || "";
+
+  const dFrom = dateFromVal ? new Date(dateFromVal + "T00:00:00") : null;
+  const dTo = dateToVal ? new Date(dateToVal + "T23:59:59") : null;
+
+  const filtered = (window._feedbackCache || []).filter(f => {
+    if(trainingF !== "ALL" && f.training_id !== trainingF) return false;
+    if(userF !== "ALL" && f.user_id !== userF) return false;
+    if(ratingF !== "ALL" && String(f.rating) !== ratingF) return false;
+
+    const ts = new Date(f.created_at);
+    if(dFrom && ts < dFrom) return false;
+    if(dTo && ts > dTo) return false;
+
+    if(searchQ){
+      const haystack = `${f.profiles?.name||""} ${f.profiles?.employee_id||""} ${f.trainings?.title||""} ${f.comments||""}`.toLowerCase();
+      if(!haystack.includes(searchQ)) return false;
+    }
+    return true;
+  });
+
+  if(!filtered.length){
+    container.innerHTML = `<div class="card empty" style="text-align:center;padding:30px">No feedback found.</div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="tablewrap" style="overflow-x:auto">
+      <table class="table">
+        <thead>
+          <tr>
+            <th style="white-space:nowrap">Date</th>
+            <th style="white-space:nowrap">User</th>
+            <th style="white-space:nowrap">Training</th>
+            <th style="white-space:nowrap">Rating</th>
+            <th>Comments</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.map(f => `
+            <tr>
+              <td style="white-space:nowrap">${new Date(f.created_at).toLocaleDateString("en-IN")}</td>
+              <td><b>${esc(f.profiles?.name||"")}</b><br><span class="muted" style="font-size:12px">${esc(f.profiles?.employee_id||"-")}</span></td>
+              <td>${esc(f.trainings?.title||"")}</td>
+              <td style="white-space:nowrap;color:#e8912c">${"★".repeat(f.rating||0)}${"☆".repeat(5-(f.rating||0))}</td>
+              <td>${esc(f.comments||"-")}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 // --- OTHER SYSTEM MODULES ---
@@ -3258,7 +3471,9 @@ async function history(){
   const admin = profile.role === "admin";
 
   let attQuery = sb.from("assessment_attempts").select("*, trainings(title), profiles(name, employee_id, username)").order("created_at", { ascending: false });
-  let progQuery = sb.from("training_progress").select("*, trainings(title), profiles(name, employee_id, username)").order("updated_at", { ascending: false });
+  // Note: training_progress has no defined FK relationship to profiles, so it cannot be embedded
+  // in the select (that silently fails the whole query). User names are resolved below via profilesById instead.
+  let progQuery = sb.from("training_progress").select("*, trainings(title)").order("created_at", { ascending: false });
   let trQuery = sb.from("trainings").select("*, profiles(name, employee_id)").order("updated_at", { ascending: false });
   let profQuery = sb.from("profiles").select("*").order("created_at", { ascending: false });
 
@@ -3281,6 +3496,9 @@ async function history(){
   const trainingsList = trRes.data || [];
   const profilesList = profRes.data || [];
 
+  const profilesById = {};
+  profilesList.forEach(pr => { if(pr.id) profilesById[String(pr.id).toLowerCase()] = pr; });
+
   let auditRecords = [];
 
   attempts.forEach(a => {
@@ -3300,10 +3518,11 @@ async function history(){
 
   progresses.forEach(p => {
     const isCompleted = p.status === 'completed' || String(p.status).toLowerCase() === 'completed';
+    const pProfile = profilesById[String(p.user_id || "").toLowerCase()];
     auditRecords.push({
       id: `prog_${p.id}`,
-      timestamp: new Date(p.updated_at || p.created_at || Date.now()),
-      user: p.profiles?.name ? `${p.profiles.name} (${p.profiles.employee_id || '-'})` : (p.user_id || "User"),
+      timestamp: new Date(p.created_at || Date.now()),
+      user: pProfile?.name ? `${pProfile.name} (${pProfile.employee_id || '-'})` : (p.user_id || "User"),
       action: isCompleted ? "Training Completed" : "Training Started",
       module: "Training",
       target: p.trainings?.title || "Training Module",
@@ -3545,7 +3764,7 @@ function closeModal(){ $("modal")?.remove(); }
 async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
-  return ({dash, users, train:training, notes:notifications, results:assessmentResults, progress, reports, history}[x] || dash)();
+  return ({dash, users, train:training, notes:notifications, results:assessmentResults, progress, reports, history, feedback:feedbackPage}[x] || dash)();
 }
 
 (async()=>{
