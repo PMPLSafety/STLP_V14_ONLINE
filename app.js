@@ -36,7 +36,7 @@ function validateEmail(email) {
 }
 
 function loginPage(msg=""){
-  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Your Organization Name</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
+  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Talwandi Sabo Thermal Plant</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
 }
 
 async function login(){
@@ -87,7 +87,7 @@ async function logout(){
 
 const MENU_ICONS = {
   dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
-  progress:"📈", reports:"📄", history:"🕒", feedback:"💬"
+  progress:"📈", reports:"📄", history:"🕒", feedback:"💬", sop:"📁"
 };
 
 let _clockTimer = null;
@@ -107,8 +107,8 @@ function toggleMobileSidebar(){
 function layout(active, title, html){
   let admin = profile.role === "admin";
   let menu = admin ?
-    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"],["feedback","Feedback"]] :
-    [["dash","Dashboard"],["train","My Trainings"],["notes","Notifications"],["results","Assessments"],["history","History"]];
+    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["sop","SOP's"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"],["feedback","Feedback"]] :
+    [["dash","Dashboard"],["train","My Trainings"],["sop","SOP's"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
   const collapsed = _sidebarCollapsedPref();
   const initials = (profile.name||"?").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase();
@@ -117,8 +117,8 @@ function layout(active, title, html){
     <div class="side-scrim" id="sideScrim" onclick="toggleMobileSidebar()"></div>
     <aside class="side${collapsed?" collapsed":""}" id="sideEl">
       <button class="side-toggle" onclick="toggleSidebar()" title="Collapse sidebar">${collapsed?"›":"‹"}</button>
-      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Your Organization Name</small></span></div>
-      <div class="nav">${menu.map(m=>`<button class="${active===m[0]?"active":""}" data-tip="${esc(m[1])}" onclick="route('${m[0]}')"><span class="ico">${MENU_ICONS[m[0]]||"•"}</span><span class="lbl">${esc(m[1])}</span></button>`).join("")}</div>
+      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Talwandi Sabo Thermal Plant</small></span></div>
+      <div class="nav">${menu.map(m=>`<button class="${active===m[0]?"active":""}" data-tip="${esc(m[1])}" onclick="route('${m[0]}')"><span class="ico">${MENU_ICONS[m[0]]||"•"}</span><span class="lbl">${esc(m[1])}</span>${m[0]==="sop"&&admin?'<span class="badge o" id="sopNavBadge" style="display:none;margin-left:auto"></span>':""}</button>`).join("")}</div>
       <div class="sidebar-foot"><button class="btn light full" onclick="logout()">🚪 <span class="lbl-logout">Logout</span></button></div>
     </aside>
     <main class="main${collapsed?" collapsed":""}" id="mainEl">
@@ -137,6 +137,7 @@ function layout(active, title, html){
     </main>`;
 
   _startClock();
+  if(admin) _refreshSopBadge();
 }
 
 function _startClock(){
@@ -795,7 +796,7 @@ function addUserForm(){
           <div><label>Password *</label><input id=up type=password value="TSL@1234"></div>
           <div><label>Department</label><input id=ud placeholder="Electrical"></div>
           <div><label>Designation</label><input id=udes placeholder="Engineer"></div>
-          <div class=fullfield><label>Company</label><input id=uc value="Your Organization Name"></div>
+          <div class=fullfield><label>Company</label><input id=uc value="Talwandi Sabo Thermal Plant"></div>
           <div>
             <label>Status</label>
             <select id=ustatus>
@@ -1104,7 +1105,7 @@ async function executeExcelImport(){
       let name = cleanExcelVal(row["Name"]);
       let dept = cleanExcelVal(row["Department"]);
       let desig = cleanExcelVal(row["Designation"]);
-      let comp = cleanExcelVal(row["Company"]) || "Your Organization Name";
+      let comp = cleanExcelVal(row["Company"]) || "Talwandi Sabo Thermal Plant";
       let statusStr = cleanExcelVal(row["Status"]).toLowerCase();
       let emailVal = cleanExcelVal(row["Username/Email"]);
 
@@ -1273,7 +1274,7 @@ async function exportUsersToExcel(){
         "Name": "Sample Employee",
         "Department": "Electrical",
         "Designation": "Engineer",
-        "Company": "Your Organization Name",
+        "Company": "Talwandi Sabo Thermal Plant",
         "Status": "Active",
         "Username/Email": "emp001@tsl.internal"
       }];
@@ -2348,7 +2349,7 @@ async function showCertificate(attemptId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">Your Organization Name</div>
+          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(a.profiles?.name||"")}</h2>
@@ -2390,7 +2391,7 @@ async function showDeclarationCertificate(trainingId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">Your Organization Name</div>
+          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(profile.name||"")}</h2>
@@ -3764,7 +3765,162 @@ function closeModal(){ $("modal")?.remove(); }
 async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
-  return ({dash, users, train:training, notes:notifications, results:assessmentResults, progress, reports, history, feedback:feedbackPage}[x] || dash)();
+  return ({dash, users, train:training, sop:sopPage, notes:notifications, results:assessmentResults, progress, reports, history, feedback:feedbackPage}[x] || dash)();
+}
+
+// --- SOP MODULE ---
+
+async function _refreshSopBadge(){
+  const el = $("sopNavBadge");
+  if(!el) return;
+  const r = await sb.from("sops").select("id",{count:"exact",head:true}).eq("status","pending");
+  const n = r.count || 0;
+  if(n > 0){ el.textContent = n; el.style.display = "inline-flex"; }
+  else { el.style.display = "none"; }
+}
+
+let _sopFilter = "pending";
+
+async function sopPage(){
+  const admin = profile.role === "admin";
+
+  const r = await sb.from("sops")
+    .select("*, profiles!sops_uploaded_by_fkey(name,employee_id), reviewer:profiles!sops_reviewed_by_fkey(name)")
+    .order("created_at",{ascending:false});
+
+  if(r.error) return layout("sop","SOP's",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
+
+  const all = r.data || [];
+  window._sopCache = all;
+
+  const visible = admin
+    ? all.filter(s => _sopFilter==="all" ? true : s.status===_sopFilter)
+    : all.filter(s => s.status==="approved" || s.uploaded_by===profile.id);
+
+  const pendingCount = all.filter(s=>s.status==="pending").length;
+
+  const tabs = admin ? `
+    <div class="actions" style="margin-bottom:14px">
+      ${[["pending","Pending"],["approved","Approved"],["rejected","Rejected"],["all","All"]].map(t=>`
+        <button class="btn ${_sopFilter===t[0]?"blue":"light"}" onclick="_sopFilter='${t[0]}';route('sop')">
+          ${t[1]}${t[0]==="pending"&&pendingCount>0?` <span class="badge o">${pendingCount}</span>`:""}
+        </button>`).join("")}
+    </div>` : "";
+
+  layout("sop","SOP's",`
+    <div class="actions" style="margin-bottom:14px;justify-content:space-between">
+      <div class="muted">${admin ? "Review SOPs uploaded by users, then approve to publish them for everyone." : "Browse approved SOPs, or upload a new one for admin review."}</div>
+      <button class="btn blue" onclick="sopUploadForm()">+ Upload SOP</button>
+    </div>
+    ${tabs}
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+      ${visible.map(s=>`
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+            <h3 style="margin:0">${esc(s.title)}</h3>
+            <span class="badge ${s.status==="approved"?"g":s.status==="rejected"?"r":"o"}">${s.status}</span>
+          </div>
+          ${s.description ? `<p class="muted" style="margin:6px 0">${esc(s.description)}</p>` : ""}
+          <p style="font-size:12.5px;color:var(--slate-500);margin:6px 0">
+            📎 ${esc(s.file_name)}<br>
+            Uploaded by <b>${esc(s.profiles?.name||"-")}</b> (${esc(s.profiles?.employee_id||"-")}) · ${new Date(s.created_at).toLocaleDateString("en-IN")}
+          </p>
+          ${s.status==="rejected" && s.review_remarks ? `<p style="font-size:12.5px;color:#a32d2d"><b>Remarks:</b> ${esc(s.review_remarks)}</p>` : ""}
+          ${s.status==="approved" && s.reviewer?.name ? `<p style="font-size:12px;color:var(--slate-500)">Approved by ${esc(s.reviewer.name)}</p>` : ""}
+          <div class="actions" style="margin-top:10px">
+            <button class="btn light" onclick="viewSopFile('${s.file_path}')">📄 View</button>
+            ${admin && s.status==="pending" ? `
+              <button class="btn blue" onclick="approveSop('${s.id}')">✅ Approve</button>
+              <button class="btn light" onclick="rejectSop('${s.id}')">❌ Reject</button>
+            ` : ""}
+          </div>
+        </div>
+      `).join("") || '<div class="card empty">No SOPs to show here yet.</div>'}
+    </div>
+  `);
+}
+
+function sopUploadForm(){
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal"><div class="modal">
+      <h2>Upload SOP</h2>
+      <label>Title *</label><input id="sopTitle" placeholder="e.g. Boiler Lockout-Tagout Procedure">
+      <label>Description</label><textarea id="sopDesc" rows="3" placeholder="Optional notes about this SOP"></textarea>
+      <label>File *</label><input id="sopFile" type="file" accept=".pdf,.doc,.docx,.ppt,.pptx,.jpg,.jpeg,.png">
+      <p class="muted" style="font-size:12px;margin-top:6px">Your upload will be reviewed by an admin before it becomes visible to others.</p>
+      <div class="actions" style="margin-top:15px">
+        <button class="btn blue" id="sopSubmitBtn" onclick="saveSop()">Submit for Review</button>
+        <button class="btn light" onclick="closeModal()">Cancel</button>
+      </div>
+    </div></div>
+  `);
+}
+
+async function saveSop(){
+  const title = $("sopTitle").value.trim();
+  const file = $("sopFile").files[0];
+  if(!title) return alert("Title is required.");
+  if(!file) return alert("Please choose a file to upload.");
+
+  const btn = $("sopSubmitBtn");
+  if(btn){ btn.disabled = true; btn.textContent = "Uploading..."; }
+
+  const safe = file.name.replace(/[^a-zA-Z0-9._-]/g,"_");
+  const path = `sop/${profile.id}/${Date.now()}_${safe}`;
+
+  const up = await sb.storage.from("sop-documents").upload(path, file, {upsert:false});
+  if(up.error){
+    if(btn){ btn.disabled = false; btn.textContent = "Submit for Review"; }
+    return alert("Upload failed: " + up.error.message);
+  }
+
+  const r = await sb.from("sops").insert({
+    title,
+    description: $("sopDesc").value.trim() || null,
+    file_path: path,
+    file_name: file.name,
+    uploaded_by: profile.id,
+    status: "pending"
+  });
+
+  if(r.error){
+    if(btn){ btn.disabled = false; btn.textContent = "Submit for Review"; }
+    return alert(r.error.message);
+  }
+
+  closeModal();
+  route("sop");
+}
+
+async function viewSopFile(path){
+  const sr = await sb.storage.from("sop-documents").createSignedUrl(path, 3600);
+  if(sr.error) return alert(sr.error.message);
+  window.open(sr.data.signedUrl, "_blank");
+}
+
+async function approveSop(id){
+  if(!confirm("Approve this SOP? It will become visible to all users.")) return;
+  const r = await sb.from("sops").update({
+    status: "approved",
+    reviewed_by: profile.id,
+    reviewed_at: new Date().toISOString(),
+    review_remarks: null
+  }).eq("id", id);
+  if(r.error) return alert(r.error.message);
+  route("sop");
+}
+
+async function rejectSop(id){
+  const remarks = prompt("Reason for rejecting this SOP (shown to the uploader):", "");
+  if(remarks === null) return; // cancelled
+  const r = await sb.from("sops").update({
+    status: "rejected",
+    reviewed_by: profile.id,
+    reviewed_at: new Date().toISOString(),
+    review_remarks: remarks.trim() || null
+  }).eq("id", id);
+  if(r.error) return alert(r.error.message);
+  route("sop");
 }
 
 (async()=>{
