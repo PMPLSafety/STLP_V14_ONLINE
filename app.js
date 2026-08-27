@@ -36,7 +36,7 @@ function validateEmail(email) {
 }
 
 function loginPage(msg=""){
-  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Talwandi Sabo Thermal Plant</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
+  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Your Organization Name</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
 }
 
 async function login(){
@@ -117,7 +117,7 @@ function layout(active, title, html){
     <div class="side-scrim" id="sideScrim" onclick="toggleMobileSidebar()"></div>
     <aside class="side${collapsed?" collapsed":""}" id="sideEl">
       <button class="side-toggle" onclick="toggleSidebar()" title="Collapse sidebar">${collapsed?"›":"‹"}</button>
-      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Talwandi Sabo Thermal Plant</small></span></div>
+      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Your Organization Name</small></span></div>
       <div class="nav">${menu.map(m=>`<button class="${active===m[0]?"active":""}" data-tip="${esc(m[1])}" onclick="route('${m[0]}')"><span class="ico">${MENU_ICONS[m[0]]||"•"}</span><span class="lbl">${esc(m[1])}</span>${m[0]==="sop"&&admin?'<span class="badge o" id="sopNavBadge" style="display:none;margin-left:auto"></span>':""}</button>`).join("")}</div>
       <div class="sidebar-foot"><button class="btn light full" onclick="logout()">🚪 <span class="lbl-logout">Logout</span></button></div>
     </aside>
@@ -796,7 +796,7 @@ function addUserForm(){
           <div><label>Password *</label><input id=up type=password value="TSL@1234"></div>
           <div><label>Department</label><input id=ud placeholder="Electrical"></div>
           <div><label>Designation</label><input id=udes placeholder="Engineer"></div>
-          <div class=fullfield><label>Company</label><input id=uc value="Talwandi Sabo Thermal Plant"></div>
+          <div class=fullfield><label>Company</label><input id=uc value="Your Organization Name"></div>
           <div>
             <label>Status</label>
             <select id=ustatus>
@@ -1105,7 +1105,7 @@ async function executeExcelImport(){
       let name = cleanExcelVal(row["Name"]);
       let dept = cleanExcelVal(row["Department"]);
       let desig = cleanExcelVal(row["Designation"]);
-      let comp = cleanExcelVal(row["Company"]) || "Talwandi Sabo Thermal Plant";
+      let comp = cleanExcelVal(row["Company"]) || "Your Organization Name";
       let statusStr = cleanExcelVal(row["Status"]).toLowerCase();
       let emailVal = cleanExcelVal(row["Username/Email"]);
 
@@ -1274,7 +1274,7 @@ async function exportUsersToExcel(){
         "Name": "Sample Employee",
         "Department": "Electrical",
         "Designation": "Engineer",
-        "Company": "Talwandi Sabo Thermal Plant",
+        "Company": "Your Organization Name",
         "Status": "Active",
         "Username/Email": "emp001@tsl.internal"
       }];
@@ -2349,7 +2349,7 @@ async function showCertificate(attemptId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
+          <div style="font-size:18px;font-weight:700">Your Organization Name</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(a.profiles?.name||"")}</h2>
@@ -2391,7 +2391,7 @@ async function showDeclarationCertificate(trainingId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
+          <div style="font-size:18px;font-weight:700">Your Organization Name</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(profile.name||"")}</h2>
