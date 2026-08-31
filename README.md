@@ -55,3 +55,15 @@ These should be implemented as the next modules rather than pretending they alre
 
 ## V9 Assessment Result + Certificate
 User can take assessment, receive score/pass-fail, complete training on pass, view certificate, and print/save certificate as PDF. Admin can allow retry from Assessment Results.
+
+## V10 — Upload progress, department targeting, notification timestamps, feedback export, SOP folders
+Run these two **new, additive-only** SQL files once in the Supabase SQL Editor (in any order). They do not touch or rerun any earlier setup:
+- `department_assignment.sql`
+- `sop_enhancements.sql`
+
+What's new:
+- **Training & SOP uploads** now show a blurred overlay with a real (not simulated) percentage ring while the file uploads, so admins/users can't accidentally double-submit.
+- **Department-wise training assignment**: when adding/editing a training, admin can pick "All Departments" (default, same as before) or tick specific departments. Users only see trainings targeted at their department (or at "All").
+- **Notifications** now show the publish date & time on every notification card (previously not shown at all).
+- **Feedback page** has a "Download CSV" button that exports exactly what's currently filtered/visible on screen.
+- **SOP module**: admin can create folders on demand ("+ New Folder"), move any SOP into a folder, hide/unhide a SOP from users without deleting it, and permanently delete a SOP (file + record). Every SOP card (for admin and users) now shows the uploader's name and the full upload date & time. The user upload flow itself is unchanged — users still just pick a title, description, and file; folder assignment is admin-only, done afterward.
