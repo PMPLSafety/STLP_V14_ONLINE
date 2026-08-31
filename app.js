@@ -35,6 +35,82 @@ function validateEmail(email) {
   return re.test(String(email).toLowerCase().trim());
 }
 
+// --- UPLOAD PROGRESS OVERLAY (used by Training material + SOP file uploads) ---
+// supabase-js's storage.upload() uses fetch() internally, which cannot report
+// real progress. To show a genuine percentage instead of a fake/simulated one,
+// we upload directly to the Supabase Storage REST endpoint via XMLHttpRequest,
+// which does support upload progress events.
+const UPLOAD_RING_CIRCUMFERENCE = 2 * Math.PI * 40;
+
+function showUploadOverlay(label){
+  hideUploadOverlay();
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="upload-overlay" id="uploadOverlay">
+      <div class="upload-box">
+        <div class="upload-ring">
+          <svg viewBox="0 0 96 96">
+            <circle class="track" cx="48" cy="48" r="40"></circle>
+            <circle class="bar" id="uploadRingBar" cx="48" cy="48" r="40"
+              stroke-dasharray="${UPLOAD_RING_CIRCUMFERENCE}"
+              stroke-dashoffset="${UPLOAD_RING_CIRCUMFERENCE}"></circle>
+          </svg>
+          <div class="pct" id="uploadRingPct">0%</div>
+        </div>
+        <div class="upload-label">${esc(label || "Uploading file...")}</div>
+        <div class="upload-sub">Please don't close this or click away till it finishes.</div>
+      </div>
+    </div>
+  `);
+}
+
+function setUploadProgress(pct){
+  const bar = $("uploadRingBar");
+  const txt = $("uploadRingPct");
+  if(!bar || !txt) return;
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  bar.setAttribute("stroke-dashoffset", String(UPLOAD_RING_CIRCUMFERENCE * (1 - p/100)));
+  txt.textContent = p + "%";
+}
+
+function hideUploadOverlay(){
+  $("uploadOverlay")?.remove();
+}
+
+// Uploads a file directly to Supabase Storage with real % progress.
+// Returns {error:null} on success or {error:{message}} on failure — same shape
+// as supabase-js's storage.upload() so existing error-handling code keeps working.
+function uploadFileWithProgress(bucket, path, file, onProgress){
+  return new Promise(async (resolve) => {
+    const sessionRes = await sb.auth.getSession();
+    const token = sessionRes.data?.session?.access_token;
+    if(!token){ resolve({error:{message:"Not authenticated. Please log in again."}}); return; }
+
+    const xhr = new XMLHttpRequest();
+    const url = `${window.SUPABASE_URL}/storage/v1/object/${bucket}/${path}`;
+    xhr.open("POST", url, true);
+    xhr.setRequestHeader("Authorization", "Bearer " + token);
+    xhr.setRequestHeader("apikey", window.SUPABASE_ANON_KEY);
+    xhr.setRequestHeader("x-upsert", "false");
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+
+    xhr.upload.onprogress = (e) => {
+      if(e.lengthComputable && onProgress) onProgress((e.loaded / e.total) * 100);
+    };
+    xhr.onload = () => {
+      if(xhr.status >= 200 && xhr.status < 300){
+        if(onProgress) onProgress(100);
+        resolve({error:null});
+      } else {
+        let msg = "Upload failed (status " + xhr.status + ")";
+        try{ const j = JSON.parse(xhr.responseText); msg = j.message || j.error || msg; }catch(e){}
+        resolve({error:{message:msg}});
+      }
+    };
+    xhr.onerror = () => resolve({error:{message:"Network error during upload."}});
+    xhr.send(file);
+  });
+}
+
 function loginPage(msg=""){
   app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Your Organization Name</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
 }
@@ -1509,6 +1585,7 @@ async function training(){
                 <span class="badge ${t.archived ? "o" : t.published ? "g" : "o"}">${t.archived ? "Archived" : t.published ? "Published" : "Draft"}</span>
               </div>
               <p class="muted" style="margin:4px 0">${esc(t.category||"General")} · Duration: ${esc(t.duration||"1 Hour")} · Validity: ${esc(t.validity||"1 Year")}</p>
+              <p style="margin:4px 0"><span class="badge b">🏭 ${t.target_departments && t.target_departments.length ? esc(t.target_departments.join(", ")) : "All Departments"}</span></p>
               <p style="margin:8px 0">${esc(t.description||"")}</p>
               
               <div style="display:flex;gap:16px;font-size:13px;margin-top:8px;color:#555">
@@ -1546,7 +1623,10 @@ async function training(){
     sb.from("training_progress").select("*, trainings(title)").eq("user_id", profile.id)
   ]);
 
-  const activeTrainings = tRes.data || [];
+  const myDept = (profile.department || "").trim();
+  const activeTrainings = (tRes.data || []).filter(t =>
+    !t.target_departments || t.target_departments.length === 0 || t.target_departments.includes(myDept)
+  );
   const userAttempts = attRes.data || [];
   const userProgresses = progRes.data || [];
   const now = new Date();
@@ -1940,7 +2020,7 @@ async function trainingForm(id){
   let t = {
     title:"", category:"", description:"", duration:"", validity:"1 Year",
     material_url:"", assessment_required:false, passing_marks:90,
-    allowed_attempts:1, published:false
+    allowed_attempts:1, published:false, target_departments:null
   };
 
   if(id){
@@ -1948,6 +2028,11 @@ async function trainingForm(id){
     if(r.error) return alert(r.error.message);
     t = r.data;
   }
+
+  const deptRes = await sb.from("profiles").select("department").eq("role","user");
+  const allDepts = [...new Set((deptRes.data||[]).map(u=>u.department).filter(Boolean))].sort();
+  const selectedDepts = new Set(t.target_departments || []);
+  const isAllDepts = !t.target_departments || t.target_departments.length === 0;
 
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal">
@@ -1959,6 +2044,20 @@ async function trainingForm(id){
           <div><label>Duration</label><input id="td" value="${esc(t.duration||"")}"></div>
           <div class="fullfield"><label>Description</label><textarea id="tdesc" rows="4">${esc(t.description||"")}</textarea></div>
           <div><label>Validity</label><input id="tv" value="${esc(t.validity||"1 Year")}"></div>
+          <div class="fullfield">
+            <label>Assign To (Departments)</label>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <input type="checkbox" id="tdeptAll" style="width:auto" ${isAllDepts?"checked":""} onchange="document.querySelectorAll('.tdept-chk').forEach(c=>{c.disabled=this.checked; if(this.checked)c.checked=false;})">
+              <label style="margin:0;font-weight:600" for="tdeptAll">All Departments</label>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px 18px;padding:10px 12px;border:1.5px solid var(--slate-200);border-radius:10px;max-height:140px;overflow:auto">
+              ${allDepts.length ? allDepts.map(d=>`
+                <label style="display:flex;align-items:center;gap:6px;font-weight:500;margin:0;font-size:13.5px">
+                  <input type="checkbox" class="tdept-chk" style="width:auto" value="${esc(d)}" ${selectedDepts.has(d)?"checked":""} ${isAllDepts?"disabled":""}>
+                  ${esc(d)}
+                </label>`).join("") : '<span class="muted" style="font-size:12.5px">No departments found yet — add users with a Department first.</span>'}
+            </div>
+          </div>
           <div class="fullfield">
             <label>Training Material File</label>
             <input id="tfile" type="file" accept=".ppt,.pptx,.pdf,.png,.jpg,.jpeg,.webp,.mp4,.webm,.mov">
@@ -1994,6 +2093,9 @@ async function saveTraining(id){
   const file = $("tfile").files[0];
   const external = $("tm").value.trim();
 
+  const deptAll = $("tdeptAll")?.checked;
+  const selectedDepts = Array.from(document.querySelectorAll(".tdept-chk:checked")).map(c=>c.value);
+
   const payload = {
     title: $("tt").value.trim(),
     category: $("tc").value.trim(),
@@ -2005,6 +2107,7 @@ async function saveTraining(id){
     passing_marks: Math.max(1, Math.min(100, parseInt($("tp").value||90))),
     allowed_attempts: Math.max(1, parseInt($("tatt").value||1)),
     published: $("tpub").value === "true",
+    target_departments: deptAll ? null : (selectedDepts.length ? selectedDepts : null),
     updated_at: new Date().toISOString()
   };
 
@@ -2026,7 +2129,11 @@ async function saveTraining(id){
   if(file){
     const safe = file.name.replace(/[^a-zA-Z0-9._-]/g,"_");
     const path = `training/${trainingId}/${Date.now()}_${safe}`;
-    const up = await sb.storage.from("training-materials").upload(path, file, {upsert:false});
+
+    showUploadOverlay("Uploading training material...");
+    const up = await uploadFileWithProgress("training-materials", path, file, setUploadProgress);
+    hideUploadOverlay();
+
     if(up.error) return alert("Training saved, but file upload failed: "+up.error.message);
 
     await sb.from("trainings")
@@ -2527,7 +2634,10 @@ async function feedbackPage(){
     </div>
 
     <div class="card" style="margin-bottom:16px;padding:16px">
-      <h3 style="margin-top:0;margin-bottom:12px;font-size:16px">Filters</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0;font-size:16px">Filters</h3>
+        <button class="btn blue" onclick="exportFeedbackCSV()">⬇️ Download CSV</button>
+      </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:12px;align-items:end">
         <div>
           <label style="font-size:12px;font-weight:bold">Search Keyword</label>
@@ -2573,10 +2683,7 @@ async function feedbackPage(){
   renderFeedbackTable();
 }
 
-function renderFeedbackTable(){
-  const container = $("feedbackTableContent");
-  if(!container) return;
-
+function _getFilteredFeedback(){
   const searchQ = ($("fbSearch")?.value || "").toLowerCase().trim();
   const trainingF = $("fbFilterTraining")?.value || "ALL";
   const userF = $("fbFilterUser")?.value || "ALL";
@@ -2587,7 +2694,7 @@ function renderFeedbackTable(){
   const dFrom = dateFromVal ? new Date(dateFromVal + "T00:00:00") : null;
   const dTo = dateToVal ? new Date(dateToVal + "T23:59:59") : null;
 
-  const filtered = (window._feedbackCache || []).filter(f => {
+  return (window._feedbackCache || []).filter(f => {
     if(trainingF !== "ALL" && f.training_id !== trainingF) return false;
     if(userF !== "ALL" && f.user_id !== userF) return false;
     if(ratingF !== "ALL" && String(f.rating) !== ratingF) return false;
@@ -2602,6 +2709,38 @@ function renderFeedbackTable(){
     }
     return true;
   });
+}
+
+function exportFeedbackCSV(){
+  const filtered = _getFilteredFeedback();
+  if(!filtered.length) return alert("No feedback to export for the current filters.");
+
+  let csv = "Date,User,Employee ID,Training,Rating,Comments\n";
+  filtered.forEach(f => {
+    const dateStr = new Date(f.created_at).toLocaleString("en-IN");
+    const row = [
+      dateStr,
+      f.profiles?.name || "",
+      f.profiles?.employee_id || "",
+      f.trainings?.title || "",
+      f.rating || "",
+      f.comments || ""
+    ];
+    csv += row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",") + "\n";
+  });
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `STLP_Feedback_${Date.now()}.csv`;
+  a.click();
+}
+
+function renderFeedbackTable(){
+  const container = $("feedbackTableContent");
+  if(!container) return;
+
+  const filtered = _getFilteredFeedback();
 
   if(!filtered.length){
     container.innerHTML = `<div class="card empty" style="text-align:center;padding:30px">No feedback found.</div>`;
@@ -2654,7 +2793,11 @@ async function notifications(){
     ${admin ? `<div class="actions"><button class="btn blue" onclick="addNotificationForm()">+ Add Notification</button></div>` : ""}
     <div style="margin-top:16px">${(r.data||[]).map(n=>`
       <div class="card" style="margin-bottom:12px">
-        <h3>${esc(n.title)}</h3><p>${esc(n.message)}</p>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+          <h3 style="margin:0">${esc(n.title)}</h3>
+          <span class="muted" style="font-size:12px;white-space:nowrap">🕐 ${n.created_at ? new Date(n.created_at).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : "-"}</span>
+        </div>
+        <p style="margin:8px 0 0">${esc(n.message)}</p>
       </div>`).join("")||'<div class="card empty">No notifications.</div>'}</div>
   `);
 }
@@ -3780,22 +3923,34 @@ async function _refreshSopBadge(){
 }
 
 let _sopFilter = "pending";
+let _sopFolderFilter = "all";
 
 async function sopPage(){
   const admin = profile.role === "admin";
 
-  const r = await sb.from("sops")
-    .select("*, profiles!sops_uploaded_by_fkey(name,employee_id), reviewer:profiles!sops_reviewed_by_fkey(name)")
-    .order("created_at",{ascending:false});
+  const [r, fr] = await Promise.all([
+    sb.from("sops")
+      .select("*, profiles!sops_uploaded_by_fkey(name,employee_id), reviewer:profiles!sops_reviewed_by_fkey(name)")
+      .order("created_at",{ascending:false}),
+    sb.from("sop_folders").select("*").order("name",{ascending:true})
+  ]);
 
   if(r.error) return layout("sop","SOP's",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
 
   const all = r.data || [];
+  const folders = fr.data || [];
   window._sopCache = all;
+  window._sopFoldersCache = folders;
 
-  const visible = admin
+  const statusScoped = admin
     ? all.filter(s => _sopFilter==="all" ? true : s.status===_sopFilter)
-    : all.filter(s => s.status==="approved" || s.uploaded_by===profile.id);
+    : all.filter(s => (s.status==="approved" && !s.is_hidden) || s.uploaded_by===profile.id);
+
+  const visible = statusScoped.filter(s => {
+    if(_sopFolderFilter==="all") return true;
+    if(_sopFolderFilter==="uncat") return !s.folder_id;
+    return s.folder_id === _sopFolderFilter;
+  });
 
   const pendingCount = all.filter(s=>s.status==="pending").length;
 
@@ -3807,23 +3962,42 @@ async function sopPage(){
         </button>`).join("")}
     </div>` : "";
 
+  const folderTabs = `
+    <div class="actions" style="margin-bottom:16px">
+      <button class="btn ${_sopFolderFilter==="all"?"blue":"light"}" onclick="_sopFolderFilter='all';route('sop')">📁 All Folders</button>
+      <button class="btn ${_sopFolderFilter==="uncat"?"blue":"light"}" onclick="_sopFolderFilter='uncat';route('sop')">📄 Uncategorized</button>
+      ${folders.map(f=>`
+        <button class="btn ${_sopFolderFilter===f.id?"blue":"light"}" onclick="_sopFolderFilter='${f.id}';route('sop')">📁 ${esc(f.name)}</button>
+      `).join("")}
+      ${admin ? `<button class="btn ghost" onclick="createSopFolderPrompt()">+ New Folder</button>` : ""}
+    </div>`;
+
   layout("sop","SOP's",`
     <div class="actions" style="margin-bottom:14px;justify-content:space-between">
-      <div class="muted">${admin ? "Review SOPs uploaded by users, then approve to publish them for everyone." : "Browse approved SOPs, or upload a new one for admin review."}</div>
+      <div class="muted">${admin ? "Review SOPs uploaded by users, then approve to publish them for everyone. Organize them into folders, hide, or delete as needed." : "Browse approved SOPs, or upload a new one for admin review."}</div>
       <button class="btn blue" onclick="sopUploadForm()">+ Upload SOP</button>
     </div>
     ${tabs}
+    ${folderTabs}
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
-      ${visible.map(s=>`
-        <div class="card">
+      ${visible.map(s=>{
+        const folderName = s.folder_id ? (folders.find(f=>f.id===s.folder_id)?.name || "Unknown Folder") : "Uncategorized";
+        const uploadedStamp = s.created_at ? new Date(s.created_at).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : "-";
+        return `
+        <div class="card" style="${s.is_hidden?"opacity:.6":""}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
             <h3 style="margin:0">${esc(s.title)}</h3>
-            <span class="badge ${s.status==="approved"?"g":s.status==="rejected"?"r":"o"}">${s.status}</span>
+            <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+              <span class="badge ${s.status==="approved"?"g":s.status==="rejected"?"r":"o"}">${s.status}</span>
+              ${s.is_hidden ? `<span class="badge r">Hidden</span>` : ""}
+            </div>
           </div>
+          <p style="margin:6px 0"><span class="badge b">📁 ${esc(folderName)}</span></p>
           ${s.description ? `<p class="muted" style="margin:6px 0">${esc(s.description)}</p>` : ""}
           <p style="font-size:12.5px;color:var(--slate-500);margin:6px 0">
             📎 ${esc(s.file_name)}<br>
-            Uploaded by <b>${esc(s.profiles?.name||"-")}</b> (${esc(s.profiles?.employee_id||"-")}) · ${new Date(s.created_at).toLocaleDateString("en-IN")}
+            Uploaded by <b>${esc(s.profiles?.name||"-")}</b> (${esc(s.profiles?.employee_id||"-")})<br>
+            🕐 ${uploadedStamp}
           </p>
           ${s.status==="rejected" && s.review_remarks ? `<p style="font-size:12.5px;color:#a32d2d"><b>Remarks:</b> ${esc(s.review_remarks)}</p>` : ""}
           ${s.status==="approved" && s.reviewer?.name ? `<p style="font-size:12px;color:var(--slate-500)">Approved by ${esc(s.reviewer.name)}</p>` : ""}
@@ -3834,10 +4008,69 @@ async function sopPage(){
               <button class="btn light" onclick="rejectSop('${s.id}')">❌ Reject</button>
             ` : ""}
           </div>
+          ${admin ? `
+            <div class="actions" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--slate-100)">
+              <select style="width:auto;padding:7px 10px;font-size:12.5px" onchange="moveSopFolder('${s.id}', this.value)">
+                <option value="">Move to folder...</option>
+                <option value="__none__">Uncategorized</option>
+                ${folders.map(f=>`<option value="${f.id}" ${s.folder_id===f.id?"selected":""}>${esc(f.name)}</option>`).join("")}
+              </select>
+              <button class="btn light" onclick="toggleHideSop('${s.id}', ${!s.is_hidden})">${s.is_hidden?"👁️ Unhide":"🙈 Hide"}</button>
+              <button class="btn light" style="color:#d32f2f;border-color:#f8d7da" onclick="deleteSop('${s.id}','${s.file_path}','${esc(s.title)}')">🗑️ Delete</button>
+            </div>
+          ` : ""}
         </div>
-      `).join("") || '<div class="card empty">No SOPs to show here yet.</div>'}
+      `}).join("") || '<div class="card empty">No SOPs to show here yet.</div>'}
     </div>
   `);
+}
+
+function createSopFolderPrompt(){
+  const name = prompt("New folder name (e.g. Electrical, Mechanical, Boiler):", "");
+  if(name === null) return;
+  const trimmed = name.trim();
+  if(!trimmed) return;
+  createSopFolder(trimmed);
+}
+
+async function createSopFolder(name){
+  const r = await sb.from("sop_folders").insert({ name, created_by: profile.id });
+  if(r.error){
+    if(String(r.error.message||"").toLowerCase().includes("duplicate")) return alert("A folder with this name already exists.");
+    return alert(r.error.message);
+  }
+  route("sop");
+}
+
+async function moveSopFolder(id, folderId){
+  if(!folderId) return; // "Move to folder..." placeholder selected, no-op
+  const r = await sb.from("sops").update({
+    folder_id: folderId === "__none__" ? null : folderId,
+    updated_at: new Date().toISOString()
+  }).eq("id", id);
+  if(r.error) return alert(r.error.message);
+  route("sop");
+}
+
+async function toggleHideSop(id, hide){
+  if(!confirm(hide ? "Hide this SOP from users? Admins can still see and unhide it anytime." : "Unhide this SOP so users can see it again?")) return;
+  const r = await sb.from("sops").update({
+    is_hidden: hide,
+    updated_at: new Date().toISOString()
+  }).eq("id", id);
+  if(r.error) return alert(r.error.message);
+  route("sop");
+}
+
+async function deleteSop(id, filePath, title){
+  if(!confirm(`Permanently delete "${title}"? This will remove the file and cannot be undone.`)) return;
+  const del = await sb.storage.from("sop-documents").remove([filePath]);
+  if(del.error && !String(del.error.message||"").toLowerCase().includes("not found")){
+    if(!confirm("Could not delete the stored file (" + del.error.message + "). Delete the SOP record anyway?")) return;
+  }
+  const r = await sb.from("sops").delete().eq("id", id);
+  if(r.error) return alert(r.error.message);
+  route("sop");
 }
 
 function sopUploadForm(){
@@ -3868,7 +4101,10 @@ async function saveSop(){
   const safe = file.name.replace(/[^a-zA-Z0-9._-]/g,"_");
   const path = `sop/${profile.id}/${Date.now()}_${safe}`;
 
-  const up = await sb.storage.from("sop-documents").upload(path, file, {upsert:false});
+  showUploadOverlay("Uploading SOP document...");
+  const up = await uploadFileWithProgress("sop-documents", path, file, setUploadProgress);
+  hideUploadOverlay();
+
   if(up.error){
     if(btn){ btn.disabled = false; btn.textContent = "Submit for Review"; }
     return alert("Upload failed: " + up.error.message);
