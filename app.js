@@ -13,6 +13,18 @@ const USER_EXCEL_COLUMNS = [
   "Username/Email"
 ];
 
+// Single Source of Truth Schema for Pre-Test / Post Assessment Question Import
+const QUESTION_EXCEL_COLUMNS = [
+  "Question No",
+  "Question Text",
+  "Option A",
+  "Option B",
+  "Option C",
+  "Option D",
+  "Correct Option"
+];
+let pendingQuestionImportRows = [];
+
 const configured = !window.SUPABASE_URL.includes("YOUR_") && !window.SUPABASE_ANON_KEY.includes("YOUR_");
 if(configured) sb = supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
 
@@ -112,7 +124,7 @@ function uploadFileWithProgress(bucket, path, file, onProgress){
 }
 
 function loginPage(msg=""){
-  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Your Organization Name</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
+  app.innerHTML = `<div class=login><div class=loginbox><h1>🛡️ Safety Training & Learning Portal</h1><p class=muted>Talwandi Sabo Thermal Plant</p><label>Email / Employee ID</label><input id=email><label>Password</label><input id=password type=password onkeydown="if(event.key==='Enter')login()"><button class="btn blue full" onclick=login()>Login</button><p class=muted>${esc(msg)}</p></div></div>`;
 }
 
 async function login(){
@@ -121,17 +133,25 @@ async function login(){
   let passVal = $('password').value;
 
   let emailToAuth = inputVal;
+  let resolvedName = null;
   if(!inputVal.includes("@")){
-    let pr = await sb.from("profiles").select("username").eq("employee_id", inputVal).single();
+    let pr = await sb.from("profiles").select("username,name").eq("employee_id", inputVal).single();
     if(pr.data && pr.data.username){
       emailToAuth = pr.data.username;
+      resolvedName = pr.data.name;
     } else {
       emailToAuth = `${inputVal.toLowerCase()}@tsl.internal`;
     }
+  } else {
+    let pr = await sb.from("profiles").select("name").eq("username", inputVal).single();
+    if(pr.data) resolvedName = pr.data.name;
   }
 
   let r = await sb.auth.signInWithPassword({ email: emailToAuth, password: passVal });
-  if(r.error) return loginPage(r.error.message);
+  if(r.error){
+    _logSecurityEvent("login_failed", { attempted_identifier: resolvedName || inputVal });
+    return loginPage(r.error.message);
+  }
 
   let p = await sb.from("profiles").select("*").eq("id", r.data.user.id).single();
   if(p.data && p.data.active === false && p.data.role !== 'admin'){
@@ -139,7 +159,23 @@ async function login(){
     return loginPage("Your account is deactivated. Please contact Admin.");
   }
 
+  _logSecurityEvent("login_success", { attempted_identifier: p.data?.name || inputVal, user_id: r.data.user.id });
   start();
+}
+
+// Fire-and-forget security event logger. Never blocks or breaks login/logout
+// if the write fails (e.g. offline) — security logging must not lock users out.
+async function _logSecurityEvent(eventType, extra={}){
+  try{
+    await sb.from("security_logs").insert({
+      event_type: eventType,
+      attempted_identifier: extra.attempted_identifier || null,
+      user_id: extra.user_id || null,
+      admin_id: extra.admin_id || null,
+      target_user_id: extra.target_user_id || null,
+      user_agent: navigator.userAgent || null
+    });
+  }catch(e){ /* non-fatal */ }
 }
 
 async function start(){
@@ -156,15 +192,108 @@ async function start(){
 }
 
 async function logout(){
+  if(profile) _logSecurityEvent("logout", { user_id: profile.id, attempted_identifier: profile.name });
+  window._impersonation = null;
+  sessionStorage.removeItem("stlp_admin_session");
   await sb.auth.signOut();
   profile = null;
   loginPage();
 }
 
+// --- ADMIN "LOGIN AS USER" (IMPERSONATION) ---
+// Uses an Edge Function (admin-impersonate-user) running with the service
+// role key to mint a one-time sign-in token for the target user — the admin
+// never sees or needs that user's password. The admin's own session is saved
+// locally first so "Return to Admin" can restore it without re-entering a
+// password. Every switch is logged server-side in security_logs.
+async function impersonateUser(targetUserId, targetName){
+  if(!confirm(`Login as ${targetName}? You'll be able to use the portal exactly as they would, and can return to your Admin account anytime from the banner at the top.`)) return;
+
+  const sessionRes = await sb.auth.getSession();
+  const adminSession = sessionRes.data?.session;
+  if(!adminSession) return alert("Could not read your current session. Please re-login and try again.");
+
+  let resp, body;
+  try{
+    resp = await fetch(`${window.SUPABASE_URL}/functions/v1/admin-impersonate-user`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + adminSession.access_token,
+        "apikey": window.SUPABASE_ANON_KEY
+      },
+      body: JSON.stringify({ target_user_id: targetUserId })
+    });
+    body = await resp.json();
+  }catch(e){
+    return alert("Could not reach the impersonation service. Check your connection and try again.");
+  }
+
+  if(!resp.ok || body.error){
+    return alert("Login as User failed: " + (body?.error || ("status " + resp.status)));
+  }
+
+  // Save the admin's session so we can restore it later without a password.
+  sessionStorage.setItem("stlp_admin_session", JSON.stringify({
+    access_token: adminSession.access_token,
+    refresh_token: adminSession.refresh_token,
+    admin_name: profile.name
+  }));
+
+  const otp = await sb.auth.verifyOtp({ email: body.email, token: body.hashed_token, type: "magiclink" });
+  if(otp.error){
+    sessionStorage.removeItem("stlp_admin_session");
+    return alert("Login as User failed: " + otp.error.message);
+  }
+
+  const p = await sb.from("profiles").select("*").eq("id", targetUserId).single();
+  if(p.error || !p.data){
+    return alert("Signed in, but could not load that user's profile.");
+  }
+
+  window._impersonation = { adminName: profile.name, userName: p.data.name };
+  profile = p.data;
+  route("dash");
+}
+
+async function returnToAdmin(){
+  const saved = sessionStorage.getItem("stlp_admin_session");
+  if(!saved) return alert("No saved Admin session found — please log in again.");
+  const adminSession = JSON.parse(saved);
+
+  const r = await sb.auth.setSession({
+    access_token: adminSession.access_token,
+    refresh_token: adminSession.refresh_token
+  });
+  sessionStorage.removeItem("stlp_admin_session");
+
+  if(r.error || !r.data?.user){
+    window._impersonation = null;
+    profile = null;
+    return loginPage("Your Admin session expired — please log in again.");
+  }
+
+  const p = await sb.from("profiles").select("*").eq("id", r.data.user.id).single();
+  if(p.error || !p.data){
+    window._impersonation = null;
+    profile = null;
+    return loginPage("Could not restore Admin profile — please log in again.");
+  }
+
+  _logSecurityEvent("impersonate_end", { user_id: p.data.id, attempted_identifier: p.data.name });
+
+  window._impersonation = null;
+  profile = p.data;
+  route("dash");
+}
+
 const MENU_ICONS = {
   dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
-  progress:"📈", reports:"📄", history:"🕒", feedback:"💬", sop:"📁"
+  progress:"📈", reports:"📄", history:"🗂️", seclogs:"🔒", feedback:"💬", sop:"📁", trainers:"🎓",
+  _history_group:"🕒"
 };
+
+let currentRoute = "dash";
 
 let _clockTimer = null;
 function _sidebarCollapsedPref(){ return localStorage.getItem("stlp_sidebar_collapsed") === "1"; }
@@ -180,24 +309,58 @@ function toggleMobileSidebar(){
   $("sideScrim")?.classList.toggle("show");
 }
 
+let _sideHistoryOpen = null; // null = auto (open if a history sub-route is active)
+function toggleSideHistoryGroup(){
+  _sideHistoryOpen = !( _sideHistoryOpen === null ? true : _sideHistoryOpen );
+  route(currentRoute === "seclogs" ? "seclogs" : "history");
+}
+
+function renderSideMenu(menu, admin, active){
+  return `<div class="nav">${menu.map(m => {
+    const [key, label, sub] = m;
+    if(sub){
+      const isActiveGroup = sub.some(s => s[0] === active);
+      const open = _sideHistoryOpen === null ? isActiveGroup : _sideHistoryOpen;
+      return `
+        <button class="${isActiveGroup?"active":""}" data-tip="${esc(label)}" onclick="toggleSideHistoryGroup()">
+          <span class="ico">${MENU_ICONS[key]||"🕒"}</span><span class="lbl">${esc(label)}</span>
+          <span style="margin-left:auto;font-size:11px">${open?"▾":"▸"}</span>
+        </button>
+        ${open ? sub.map(s => `
+          <button class="${active===s[0]?"active":""}" style="padding-left:34px" data-tip="${esc(s[1])}" onclick="route('${s[0]}')">
+            <span class="ico">${MENU_ICONS[s[0]]||"•"}</span><span class="lbl">${esc(s[1])}</span>
+          </button>`).join("") : ""}
+      `;
+    }
+    return `<button class="${active===key?"active":""}" data-tip="${esc(label)}" onclick="route('${key}')"><span class="ico">${MENU_ICONS[key]||"•"}</span><span class="lbl">${esc(label)}</span>${key==="sop"&&admin?'<span class="badge o" id="sopNavBadge" style="display:none;margin-left:auto"></span>':""}</button>`;
+  }).join("")}</div>`;
+}
+
 function layout(active, title, html){
   let admin = profile.role === "admin";
   let menu = admin ?
-    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["sop","SOP's"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["history","History"],["feedback","Feedback"]] :
-    [["dash","Dashboard"],["train","My Trainings"],["sop","SOP's"],["notes","Notifications"],["results","Assessments"],["history","History"]];
+    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],
+      ["_history_group","History",[["history","Audit Logs"],["seclogs","Security Logs"]]],
+      ["feedback","Feedback"]] :
+    [["dash","Dashboard"],["train","My Trainings"],["sop","Library"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
   const collapsed = _sidebarCollapsedPref();
   const initials = (profile.name||"?").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase();
 
   app.innerHTML = `
+    ${window._impersonation ? `
+    <div id="impersonateBanner" style="position:fixed;top:0;left:0;right:0;z-index:150;background:#e8912c;color:#231400;padding:9px 16px;text-align:center;font-weight:700;font-size:13.5px;display:flex;justify-content:center;align-items:center;gap:14px">
+      <span>🔓 Viewing as <b>${esc(window._impersonation.userName)}</b> (Admin: ${esc(window._impersonation.adminName)})</span>
+      <button class="btn" style="background:#231400;color:#fff;padding:5px 12px;font-size:12.5px" onclick="returnToAdmin()">🔙 Return to Admin</button>
+    </div>` : ""}
     <div class="side-scrim" id="sideScrim" onclick="toggleMobileSidebar()"></div>
-    <aside class="side${collapsed?" collapsed":""}" id="sideEl">
+    <aside class="side${collapsed?" collapsed":""}" id="sideEl" style="${window._impersonation?"margin-top:40px":""}">
       <button class="side-toggle" onclick="toggleSidebar()" title="Collapse sidebar">${collapsed?"›":"‹"}</button>
-      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Your Organization Name</small></span></div>
-      <div class="nav">${menu.map(m=>`<button class="${active===m[0]?"active":""}" data-tip="${esc(m[1])}" onclick="route('${m[0]}')"><span class="ico">${MENU_ICONS[m[0]]||"•"}</span><span class="lbl">${esc(m[1])}</span>${m[0]==="sop"&&admin?'<span class="badge o" id="sopNavBadge" style="display:none;margin-left:auto"></span>':""}</button>`).join("")}</div>
+      <div class="brand"><span class="mark">🛡️</span><span class="txt">Safety Training &amp; Learning Portal<small>Talwandi Sabo Thermal Plant</small></span></div>
+      ${renderSideMenu(menu, admin, active)}
       <div class="sidebar-foot"><button class="btn light full" onclick="logout()">🚪 <span class="lbl-logout">Logout</span></button></div>
     </aside>
-    <main class="main${collapsed?" collapsed":""}" id="mainEl">
+    <main class="main${collapsed?" collapsed":""}" id="mainEl" style="${window._impersonation?"margin-top:40px":""}">
       <div class="top">
         <div style="display:flex;align-items:center;gap:12px">
           <button class="mobile-menu-btn" onclick="toggleMobileSidebar()">☰</button>
@@ -606,6 +769,7 @@ async function users(){
     <div class="actions">
       <button class="btn blue" onclick="addUserForm()">➕ Add Manual User</button>
       <button class="btn light" onclick="importExcelModal()">📥 Import Employees from Excel</button>
+      <button class="btn light" onclick="downloadUserExcelFormat()">📥 View Format</button>
       <button class="btn light" onclick="exportUsersToExcel()">📤 Export User Details</button>
     </div>
 
@@ -741,6 +905,7 @@ function renderUsersTable(page = 1) {
               <td>${esc(u.company || "-")}</td>
               <td><span class="badge ${u.active===false?"o":"g"}">${u.active===false?"🟠 Inactive":"🟢 Active"}</span></td>
               <td style="white-space:nowrap;text-align:center">
+                <button class="btn light" style="color:#12979f" onclick="impersonateUser('${u.id}','${esc(u.name)}')">🔓 Login as User</button>
                 <button class="btn light" onclick="editUser('${u.id}')">Edit</button>
                 <button class="btn light" style="color:#ed6c02" onclick="adminResetPassword('${u.id}', '${esc(u.name)}')">Reset Pass</button>
                 <button class="btn light" style="color:#d32f2f" onclick="confirmDeleteUser('${u.id}', '${esc(u.name)}', '${esc(u.employee_id)}')">Delete</button>
@@ -872,7 +1037,7 @@ function addUserForm(){
           <div><label>Password *</label><input id=up type=password value="TSL@1234"></div>
           <div><label>Department</label><input id=ud placeholder="Electrical"></div>
           <div><label>Designation</label><input id=udes placeholder="Engineer"></div>
-          <div class=fullfield><label>Company</label><input id=uc value="Your Organization Name"></div>
+          <div class=fullfield><label>Company</label><input id=uc value="Talwandi Sabo Thermal Plant"></div>
           <div>
             <label>Status</label>
             <select id=ustatus>
@@ -1046,6 +1211,20 @@ async function executeDeleteUser(id){
 
 // --- EXCEL IMPORT / EXPORT MODULE ---
 
+function downloadUserExcelFormat(){
+  if(typeof XLSX === "undefined"){
+    return alert("XLSX library is not loaded. Please ensure index.html includes the SheetJS script.");
+  }
+  const sampleRows = [
+    { "Employee ID":"EMP001", "Name":"Ravi Kumar", "Department":"Production", "Designation":"Supervisor", "Company":"ABC Pvt Ltd", "Status":"Active", "Username/Email":"ravi.kumar@example.com" },
+    { "Employee ID":"EMP002", "Name":"Simran Kaur", "Department":"HR", "Designation":"Executive", "Company":"ABC Pvt Ltd", "Status":"Active", "Username/Email":"simran.kaur@example.com" }
+  ];
+  const worksheet = XLSX.utils.json_to_sheet(sampleRows, { header: USER_EXCEL_COLUMNS });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Format");
+  XLSX.writeFile(workbook, "STLP_Employee_Import_Format.xlsx");
+}
+
 function importExcelModal(){
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal">
@@ -1181,7 +1360,7 @@ async function executeExcelImport(){
       let name = cleanExcelVal(row["Name"]);
       let dept = cleanExcelVal(row["Department"]);
       let desig = cleanExcelVal(row["Designation"]);
-      let comp = cleanExcelVal(row["Company"]) || "Your Organization Name";
+      let comp = cleanExcelVal(row["Company"]) || "Talwandi Sabo Thermal Plant";
       let statusStr = cleanExcelVal(row["Status"]).toLowerCase();
       let emailVal = cleanExcelVal(row["Username/Email"]);
 
@@ -1350,7 +1529,7 @@ async function exportUsersToExcel(){
         "Name": "Sample Employee",
         "Department": "Electrical",
         "Designation": "Engineer",
-        "Company": "Your Organization Name",
+        "Company": "Talwandi Sabo Thermal Plant",
         "Status": "Active",
         "Username/Email": "emp001@tsl.internal"
       }];
@@ -2161,6 +2340,35 @@ async function openTraining(id){
   const r = await sb.from("trainings").select("*").eq("id",id).single();
   if(r.error) return alert(r.error.message);
   const t = r.data;
+
+  // --- PRE-TEST GATE ---
+  // If this training has Pre-Test questions and the user hasn't taken it yet,
+  // show only the Pre-Test here — material & Post Assessment stay hidden
+  // until it's submitted, at which point openTraining() re-runs and the
+  // material opens automatically.
+  const preQR = await sb.from("pretest_questions").select("id").eq("training_id", id);
+  const preQuestions = preQR.data || [];
+  if(preQuestions.length){
+    const preAttR = await sb.from("pretest_attempts").select("id,score,correct_answers,total_questions").eq("training_id", id).eq("user_id", profile.id).order("created_at",{ascending:false}).limit(1);
+    const preDone = (preAttR.data||[])[0];
+    if(!preDone){
+      document.body.insertAdjacentHTML("beforeend", `
+        <div class="modalbg" id="modal">
+          <div class="modal" style="max-width:650px">
+            <h2>${esc(t.title)}</h2>
+            <div class="card" style="margin-top:10px">
+              <h3>📝 Pre-Test</h3>
+              <p class="muted">Please answer a quick ${preQuestions.length}-question Pre-Test before the training material opens. This is just to record what you already know — there's no pass/fail, and the material will open automatically right after.</p>
+              <button class="btn blue" onclick="startPretest('${id}')">Start Pre-Test</button>
+            </div>
+            <div class="actions"><button class="btn light" onclick="closeModal()">Close</button></div>
+          </div>
+        </div>
+      `);
+      return;
+    }
+  }
+
   let material = "<p class=muted>No training material added yet.</p>";
 
   if(t.material_url){
@@ -2202,7 +2410,7 @@ async function openTraining(id){
     const a = await sb.from("assessment_attempts").select("id,score,passed,created_at").eq("training_id",id).eq("user_id",profile.id).order("created_at",{ascending:false}).limit(1);
     const last = (a.data||[])[0];
     assess = `<div class="card" style="margin-top:16px">
-      <h3>Assessment Required</h3>
+      <h3>Post Assessment</h3>
       <p class="muted">Passing marks: ${t.passing_marks||90}% · Allowed attempts: ${t.allowed_attempts||1}</p>
       ${last ? `<p>Last result: <b>${last.score}%</b> — ${last.passed ? "Passed" : "Failed"}</p>` : "<p class=muted>Not attempted yet.</p>"}
       ${last && last.passed
@@ -2278,25 +2486,116 @@ async function markTrainingComplete(trainingId){
 
 // --- ASSESSMENT MODULE ---
 
-async function manageAssessment(trainingId){
-  const tr = await sb.from("trainings").select("*").eq("id",trainingId).single();
-  if(tr.error) return alert(tr.error.message);
-  if(!tr.data.assessment_required) return alert("Enable 'Assessment Required' in Edit Training first.");
-
-  const r = await sb.from("assessment_questions").select("*").eq("training_id",trainingId).order("question_no",{ascending:true});
-  const qs = r.data || [];
+// --- PRE-TEST TAKING FLOW ---
+async function startPretest(trainingId){
+  closeModal();
+  const tr = await sb.from("trainings").select("title").eq("id",trainingId).single();
+  const qr = await sb.from("pretest_questions").select("*").eq("training_id",trainingId).order("question_no",{ascending:true});
+  const qs = qr.data || [];
+  if(!qs.length) return openTraining(trainingId);
 
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
-        <h2>Assessment — ${esc(tr.data.title)}</h2>
-        <div class="actions"><button class="btn blue" onclick="questionForm('${trainingId}')">+ Add Question</button><button class="btn light" onclick="closeModal()">Close</button></div>
+        <h2>${esc(tr.data?.title||"")} — Pre-Test</h2>
+        <form id="pretestForm">${qs.map((q,i) => `
+          <div class="card" style="margin-bottom:12px">
+            <b>Q${i+1}. ${esc(q.question_text)}</b>
+            ${["A","B","C","D"].map(o => `<label class="optrow">
+              <input type="radio" class="assess-radio" name="q${q.id}" value="${o}" required><span>${o}. ${esc(q["option_"+o.toLowerCase()])}</span>
+            </label>`).join("")}
+          </div>`).join("")}
+        </form>
+        <div class="actions">
+          <button class="btn blue" onclick="submitPretest('${trainingId}')">Submit Pre-Test</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function submitPretest(trainingId){
+  const form = $("pretestForm");
+  if(!form || !form.reportValidity()) return;
+
+  const qr = await sb.from("pretest_questions").select("id,correct_option").eq("training_id",trainingId);
+  const qs = qr.data || [];
+
+  let correct = 0;
+  qs.forEach(q => {
+    const el = document.querySelector(`input[name="q${q.id}"]:checked`);
+    if(el && el.value === q.correct_option) correct++;
+  });
+  const total = qs.length;
+  const score = total ? Math.round((correct/total)*100) : 0;
+
+  const ins = await sb.from("pretest_attempts").insert({
+    training_id: trainingId, user_id: profile.id,
+    score, total_questions: total, correct_answers: correct
+  });
+  if(ins.error) return alert(ins.error.message);
+
+  closeModal();
+  // Material opens automatically right after the Pre-Test, as requested.
+  openTraining(trainingId);
+}
+
+
+async function manageAssessment(trainingId, tab){
+  tab = tab || "post";
+  const tr = await sb.from("trainings").select("*").eq("id",trainingId).single();
+  if(tr.error) return alert(tr.error.message);
+
+  let bodyHtml = "";
+  if(tab === "pre"){
+    const r = await sb.from("pretest_questions").select("*").eq("training_id",trainingId).order("question_no",{ascending:true});
+    const qs = r.data || [];
+    bodyHtml = `
+      <p class="muted" style="margin-top:0">Asked once, before the training material opens. No pass/fail — just recorded for reference.</p>
+      <div class="actions">
+        <button class="btn blue" onclick="preQuestionForm('${trainingId}')">+ Add Pre-Test Question</button>
+        <button class="btn light" onclick="importQuestionsExcelModal('${trainingId}','pre')">📥 Import Questions from Excel</button>
+        <button class="btn light" onclick="downloadQuestionExcelFormat()">📥 View Format</button>
+      </div>
+      <div style="margin-top:16px">${qs.map(q => `
+        <div class="card" style="margin-bottom:10px">
+          <b>Q${q.question_no}. ${esc(q.question_text)}</b>
+          <ol type="A">${[q.option_a, q.option_b, q.option_c, q.option_d].map((o,i) => `<li>${esc(o)} ${q.correct_option===String.fromCharCode(65+i) ? "<b>(Correct)</b>" : ""}</li>`).join("")}</ol>
+          <div class="actions"><button class="btn light" onclick="preQuestionForm('${trainingId}','${q.id}')">Edit</button><button class="btn light" onclick="deletePreQuestion('${q.id}','${trainingId}')">Delete</button></div>
+        </div>`).join("") || '<div class="card empty">No Pre-Test questions added yet. Training material will open directly for users until you add some.</div>'}</div>
+    `;
+  } else {
+    if(!tr.data.assessment_required){
+      bodyHtml = `<div class="card empty">Enable 'Assessment Required' in Edit Training first to add Post Assessment questions.</div>`;
+    } else {
+      const r = await sb.from("assessment_questions").select("*").eq("training_id",trainingId).order("question_no",{ascending:true});
+      const qs = r.data || [];
+      bodyHtml = `
+        <div class="actions">
+          <button class="btn blue" onclick="questionForm('${trainingId}')">+ Add Question</button>
+          <button class="btn light" onclick="importQuestionsExcelModal('${trainingId}','post')">📥 Import Questions from Excel</button>
+          <button class="btn light" onclick="downloadQuestionExcelFormat()">📥 View Format</button>
+        </div>
         <div style="margin-top:16px">${qs.map(q => `
           <div class="card" style="margin-bottom:10px">
             <b>Q${q.question_no}. ${esc(q.question_text)}</b>
             <ol type="A">${[q.option_a, q.option_b, q.option_c, q.option_d].map((o,i) => `<li>${esc(o)} ${q.correct_option===String.fromCharCode(65+i) ? "<b>(Correct)</b>" : ""}</li>`).join("")}</ol>
             <div class="actions"><button class="btn light" onclick="questionForm('${trainingId}','${q.id}')">Edit</button><button class="btn light" onclick="deleteQuestion('${q.id}','${trainingId}')">Delete</button></div>
           </div>`).join("") || '<div class="card empty">No questions added yet.</div>'}</div>
+      `;
+    }
+  }
+
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:900px">
+        <h2>Assessment — ${esc(tr.data.title)}</h2>
+        <div class="actions" style="margin-bottom:6px">
+          <button class="btn ${tab==='pre'?'blue':'light'}" onclick="closeModal();manageAssessment('${trainingId}','pre')">A. Pre-Test</button>
+          <button class="btn ${tab==='post'?'blue':'light'}" onclick="closeModal();manageAssessment('${trainingId}','post')">B. Post Assessment</button>
+          <button class="btn light" style="margin-left:auto" onclick="closeModal()">Close</button>
+        </div>
+        ${bodyHtml}
       </div>
     </div>
   `);
@@ -2369,7 +2668,224 @@ async function deleteQuestion(id, trainingId){
   if(!confirm("Delete this question?")) return;
   await sb.from("assessment_questions").delete().eq("id",id);
   closeModal();
-  manageAssessment(trainingId);
+  manageAssessment(trainingId,"post");
+}
+
+// --- PRE-TEST QUESTION CRUD (mirrors the Post Assessment question CRUD above) ---
+async function preQuestionForm(trainingId, id){
+  let q = {question_text:"", option_a:"", option_b:"", option_c:"", option_d:"", correct_option:"A", question_no:1};
+  if(id){
+    const r = await sb.from("pretest_questions").select("*").eq("id",id).single();
+    if(!r.error) q = r.data;
+  } else {
+    const r = await sb.from("pretest_questions").select("question_no").eq("training_id",trainingId).order("question_no",{ascending:false}).limit(1);
+    q.question_no = ((r.data||[])[0]?.question_no || 0) + 1;
+  }
+
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal2">
+      <div class="modal">
+        <h2>${id ? "Edit" : "Add"} Pre-Test Question</h2>
+        <label>Question *</label><textarea id="pqtext" rows="3">${esc(q.question_text)}</textarea>
+        <div class="formgrid">
+          <div><label>Option A *</label><input id="pqa" value="${esc(q.option_a)}"></div>
+          <div><label>Option B *</label><input id="pqb" value="${esc(q.option_b)}"></div>
+          <div><label>Option C *</label><input id="pqc" value="${esc(q.option_c)}"></div>
+          <div><label>Option D *</label><input id="pqd" value="${esc(q.option_d)}"></div>
+          <div>
+            <label>Correct Answer</label>
+            <select id="pqcorrect">
+              ${["A","B","C","D"].map(x => `<option value="${x}" ${q.correct_option===x?"selected":""}>${x}</option>`).join("")}
+            </select>
+          </div>
+          <div><label>Question No.</label><input id="pqno" type="number" min="1" value="${q.question_no}"></div>
+        </div>
+        <div class="actions" style="margin-top:15px">
+          <button class="btn blue" onclick="savePreQuestion('${trainingId}','${id||""}')">Save Question</button>
+          <button class="btn light" onclick="closeQuestionModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function savePreQuestion(trainingId, id){
+  const payload = {
+    training_id: trainingId,
+    question_text: $("pqtext").value.trim(),
+    option_a: $("pqa").value.trim(),
+    option_b: $("pqb").value.trim(),
+    option_c: $("pqc").value.trim(),
+    option_d: $("pqd").value.trim(),
+    correct_option: $("pqcorrect").value,
+    question_no: parseInt($("pqno").value || 1)
+  };
+
+  if(!payload.question_text || !payload.option_a || !payload.option_b || !payload.option_c || !payload.option_d){
+    return alert("Question and all options are required.");
+  }
+
+  const r = id ? await sb.from("pretest_questions").update(payload).eq("id",id) : await sb.from("pretest_questions").insert(payload);
+  if(r.error) return alert(r.error.message);
+
+  closeQuestionModal();
+  closeModal();
+  manageAssessment(trainingId,"pre");
+}
+
+async function deletePreQuestion(id, trainingId){
+  if(!confirm("Delete this Pre-Test question?")) return;
+  await sb.from("pretest_questions").delete().eq("id",id);
+  closeModal();
+  manageAssessment(trainingId,"pre");
+}
+
+// --- QUESTION EXCEL IMPORT (shared by Pre-Test & Post Assessment) ---
+
+function downloadQuestionExcelFormat(){
+  if(typeof XLSX === "undefined"){
+    return alert("XLSX library is not loaded. Please ensure index.html includes the SheetJS script.");
+  }
+  const sampleRows = [
+    { "Question No":1, "Question Text":"What is the first step before starting any machine?", "Option A":"Check safety guards", "Option B":"Switch on directly", "Option C":"Ignore the manual", "Option D":"Leave the area", "Correct Option":"A" },
+    { "Question No":2, "Question Text":"Which PPE is mandatory in the production area?", "Option A":"Sandals", "Option B":"Safety shoes & helmet", "Option C":"No PPE required", "Option D":"Casual wear", "Correct Option":"B" }
+  ];
+  const worksheet = XLSX.utils.json_to_sheet(sampleRows, { header: QUESTION_EXCEL_COLUMNS });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Format");
+  XLSX.writeFile(workbook, "STLP_Question_Import_Format.xlsx");
+}
+
+function importQuestionsExcelModal(trainingId, tab){
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal2">
+      <div class="modal">
+        <h2>📥 Import ${tab==='pre'?'Pre-Test':'Post Assessment'} Questions from Excel</h2>
+        <p class="muted">Columns required: ${QUESTION_EXCEL_COLUMNS.join(" | ")}</p>
+        <div style="margin:20px 0">
+          <label>Select Excel File</label>
+          <input type="file" id="qexcelfile" accept=".xlsx, .xls, .csv">
+        </div>
+        <div class="actions">
+          <button class="btn blue" onclick="previewQuestionsExcelImport('${trainingId}','${tab}')">Parse & Preview</button>
+          <button class="btn light" onclick="closeQuestionModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+function previewQuestionsExcelImport(trainingId, tab){
+  const fileInput = $("qexcelfile");
+  if(!fileInput.files.length) return alert("Please select an Excel file first.");
+
+  const file = fileInput.files[0];
+  const reader = new FileReader();
+
+  reader.onload = function(e){
+    try {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, { type: 'array' });
+      const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rawJson = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+      if(!rawJson || rawJson.length < 2) return alert("The selected Excel file is empty or missing data rows.");
+
+      const fileHeaders = rawJson[0].map(h => String(h||"").trim());
+      const missingHeaders = QUESTION_EXCEL_COLUMNS.filter(col => !fileHeaders.includes(col));
+      if(missingHeaders.length > 0){
+        return alert(`Invalid Excel format. Missing required columns:\n\n${missingHeaders.join(", ")}\n\nUse "View Format" to download the correct template.`);
+      }
+
+      const rows = XLSX.utils.sheet_to_json(worksheet);
+
+      const validRows = rows.map(r => ({
+        question_no: parseInt(cleanExcelVal(r["Question No"])) || 1,
+        question_text: cleanExcelVal(r["Question Text"]),
+        option_a: cleanExcelVal(r["Option A"]),
+        option_b: cleanExcelVal(r["Option B"]),
+        option_c: cleanExcelVal(r["Option C"]),
+        option_d: cleanExcelVal(r["Option D"]),
+        correct_option: cleanExcelVal(r["Correct Option"]).toUpperCase()
+      })).filter(q => q.question_text !== "");
+
+      if(!validRows.length) return alert("No valid question rows found in the Excel file.");
+
+      const invalidCorrect = validRows.filter(q => !["A","B","C","D"].includes(q.correct_option));
+      if(invalidCorrect.length){
+        return alert(`Row(s) with an invalid "Correct Option" found (must be A, B, C or D):\n\nQ: ${invalidCorrect.map(q=>q.question_text).join("\n")}`);
+      }
+      const incompleteRows = validRows.filter(q => !q.option_a || !q.option_b || !q.option_c || !q.option_d);
+      if(incompleteRows.length){
+        return alert(`Row(s) missing one or more options (A-D):\n\nQ: ${incompleteRows.map(q=>q.question_text).join("\n")}`);
+      }
+
+      pendingQuestionImportRows = validRows;
+      closeQuestionModal();
+
+      let previewRowsHtml = validRows.slice(0, 10).map(q => `
+        <tr>
+          <td>${q.question_no}</td>
+          <td>${esc(q.question_text)}</td>
+          <td>${esc(q.option_a)}</td>
+          <td>${esc(q.option_b)}</td>
+          <td>${esc(q.option_c)}</td>
+          <td>${esc(q.option_d)}</td>
+          <td><b>${esc(q.correct_option)}</b></td>
+        </tr>
+      `).join("");
+
+      document.body.insertAdjacentHTML("beforeend", `
+        <div class="modalbg" id="modal2">
+          <div class="modal" style="max-width:900px">
+            <h2>Question Import Preview</h2>
+            <p class="muted">Total Questions Detected: <b>${validRows.length}</b> (Showing first 10 preview) — these will be <b>added</b> to the existing ${tab==='pre'?'Pre-Test':'Post Assessment'} questions.</p>
+            <div class="tablewrap" style="max-height:300px;overflow-y:auto;margin:15px 0">
+              <table class="table">
+                <tr><th>No.</th><th>Question</th><th>A</th><th>B</th><th>C</th><th>D</th><th>Correct</th></tr>
+                ${previewRowsHtml}
+              </table>
+            </div>
+            <div class="actions">
+              <button class="btn blue" onclick="executeQuestionsExcelImport('${trainingId}','${tab}')">Confirm & Import</button>
+              <button class="btn light" onclick="closeQuestionModal()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      `);
+
+    } catch(err){
+      alert("Error reading Excel file: " + err.message);
+    }
+  };
+
+  reader.readAsArrayBuffer(file);
+}
+
+async function executeQuestionsExcelImport(trainingId, tab){
+  if(!pendingQuestionImportRows.length) return alert("No data to import.");
+
+  const table = tab === "pre" ? "pretest_questions" : "assessment_questions";
+  const payload = pendingQuestionImportRows.map(q => ({
+    training_id: trainingId,
+    question_no: q.question_no,
+    question_text: q.question_text,
+    option_a: q.option_a,
+    option_b: q.option_b,
+    option_c: q.option_c,
+    option_d: q.option_d,
+    correct_option: q.correct_option
+  }));
+
+  const r = await sb.from(table).insert(payload);
+  pendingQuestionImportRows = [];
+
+  if(r.error) return alert("Import failed: " + r.error.message);
+
+  closeQuestionModal();
+  closeModal();
+  alert(`${payload.length} question(s) imported successfully.`);
+  manageAssessment(trainingId, tab);
 }
 
 async function startAssessment(trainingId){
@@ -2396,8 +2912,8 @@ async function startAssessment(trainingId){
         <form id="assessmentForm">${qs.map((q,i) => `
           <div class="card" style="margin-bottom:12px">
             <b>Q${i+1}. ${esc(q.question_text)}</b>
-            ${["A","B","C","D"].map(o => `<label style="display:block;margin:8px 0">
-              <input type="radio" name="q${q.id}" value="${o}" required> ${o}. ${esc(q["option_"+o.toLowerCase()])}
+            ${["A","B","C","D"].map(o => `<label class="optrow">
+              <input type="radio" class="assess-radio" name="q${q.id}" value="${o}" required><span>${o}. ${esc(q["option_"+o.toLowerCase()])}</span>
             </label>`).join("")}
           </div>`).join("")}
         </form>
@@ -2456,7 +2972,7 @@ async function showCertificate(attemptId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">Your Organization Name</div>
+          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(a.profiles?.name||"")}</h2>
@@ -2498,7 +3014,7 @@ async function showDeclarationCertificate(trainingId){
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:900px">
         <div id="certificate" style="border:8px double #1f4d3a;padding:55px 45px;text-align:center;background:#fff">
-          <div style="font-size:18px;font-weight:700">Your Organization Name</div>
+          <div style="font-size:18px;font-weight:700">TALWANDI SABO THERMAL PLANT</div>
           <h1 style="font-size:38px;margin:30px 0 10px">CERTIFICATE OF COMPLETION</h1>
           <p>This is to certify that</p>
           <h2 style="font-size:28px;margin:10px 0">${esc(profile.name||"")}</h2>
@@ -2790,7 +3306,10 @@ async function notifications(){
   const admin = profile.role === "admin";
   const r = await sb.from("notifications").select("*").order("created_at",{ascending:false});
   layout("notes","Notifications",`
-    ${admin ? `<div class="actions"><button class="btn blue" onclick="addNotificationForm()">+ Add Notification</button></div>` : ""}
+    <div class="actions">
+      ${admin ? `<button class="btn blue" onclick="addNotificationForm()">+ Add Notification</button>` : ""}
+      <button class="btn light" id="pushEnableBtn" onclick="enablePushNotifications()">🔔 Enable Notifications</button>
+    </div>
     <div style="margin-top:16px">${(r.data||[]).map(n=>`
       <div class="card" style="margin-bottom:12px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
@@ -2817,6 +3336,57 @@ async function saveNotification(){
   await sb.from("notifications").insert({ title: $("ntitle").value.trim(), message: $("nmsg").value.trim() });
   closeModal();
   notifications();
+}
+
+// --- WEB PUSH SUBSCRIPTION (iOS 16.4+ requires "Add to Home Screen" first) ---
+
+function urlBase64ToUint8Array(base64String){
+  const padding = "=".repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+}
+
+async function enablePushNotifications(){
+  if(!("serviceWorker" in navigator) || !("PushManager" in window)){
+    return alert("Push notifications aren't supported in this browser. On iPhone: open this site in Safari, tap Share → 'Add to Home Screen', then open the app icon from your Home Screen and try again (needs iOS 16.4+).");
+  }
+  const isStandalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if(isIOS && !isStandalone){
+    return alert("On iPhone, notifications only work after adding this app to your Home Screen.\n\nTap the Share icon in Safari → 'Add to Home Screen' → open STLP from the Home Screen icon → then tap 'Enable Notifications' again.");
+  }
+
+  try {
+    const permission = await Notification.requestPermission();
+    if(permission !== "granted") return alert("Notification permission was not granted.");
+
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(window.VAPID_PUBLIC_KEY)
+      });
+    }
+
+    const subJson = sub.toJSON();
+    const r = await sb.from("push_subscriptions").upsert({
+      user_id: profile.id,
+      endpoint: subJson.endpoint,
+      p256dh: subJson.keys.p256dh,
+      auth: subJson.keys.auth,
+      user_agent: navigator.userAgent
+    }, { onConflict: "endpoint" });
+
+    if(r.error) return alert("Could not save subscription: " + r.error.message);
+
+    const btn = $("pushEnableBtn");
+    if(btn) btn.textContent = "🔔 Notifications Enabled";
+    alert("Notifications enabled on this device.");
+  } catch(err){
+    alert("Could not enable notifications: " + err.message);
+  }
 }
 
 async function progress(){
@@ -3716,7 +4286,7 @@ async function history(){
   };
   historyCurrentPage = 1;
 
-  layout("history", "History Log", `
+  layout("history", "Audit Logs", `
     <p class="muted">Audit Trail & System Activity History Log</p>
     
     <div class="grid" style="margin-bottom:20px">
@@ -3905,10 +4475,289 @@ function viewActivityDetail(recordId) {
 
 function closeModal(){ $("modal")?.remove(); }
 
+// --- SECURITY LOGS ---
+let securityLogsCache = null;
+
+const SECURITY_EVENT_LABELS = {
+  login_success: "Login Success",
+  login_failed: "Login Failed",
+  logout: "Logout",
+  impersonate_start: "Admin Login-as-User",
+  impersonate_end: "Return to Admin"
+};
+
+async function securityLogsPage(){
+  const r = await sb.from("security_logs")
+    .select("*, profiles!security_logs_user_id_fkey(name,employee_id), admin:profiles!security_logs_admin_id_fkey(name), target:profiles!security_logs_target_user_id_fkey(name)")
+    .order("created_at",{ascending:false})
+    .limit(2000);
+
+  if(r.error) return layout("seclogs","Security Logs",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
+
+  const rows = r.data || [];
+  securityLogsCache = rows;
+
+  const totalCount = rows.length;
+  const failedCount = rows.filter(x=>x.event_type==="login_failed").length;
+  const impersonateCount = rows.filter(x=>x.event_type==="impersonate_start").length;
+
+  layout("seclogs","Security Logs",`
+    <p class="muted">Login, logout, and Admin "Login as User" activity — who logged in, who failed, who logged out.</p>
+    <div class="grid" style="margin-bottom:20px">
+      ${metric("Total Events", totalCount)}
+      ${metric("Failed Logins", failedCount)}
+      ${metric("Admin Impersonations", impersonateCount)}
+    </div>
+
+    <div class="card" style="margin-bottom:16px;padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0;font-size:16px">Filters</h3>
+        <button class="btn blue" onclick="exportSecurityLogsCSV()">⬇️ Download CSV</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:12px;align-items:end">
+        <div>
+          <label style="font-size:12px;font-weight:bold">Search (name)</label>
+          <input id="secSearch" placeholder="Search user name..." oninput="renderSecurityLogs()" style="width:100%;margin:4px 0 0">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Event</label>
+          <select id="secFilterEvent" onchange="renderSecurityLogs()" style="width:100%;margin:4px 0 0">
+            <option value="ALL">All Events</option>
+            ${Object.entries(SECURITY_EVENT_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Date From</label>
+          <input type="date" id="secFilterDateFrom" onchange="renderSecurityLogs()" style="width:100%;margin:4px 0 0">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Date To</label>
+          <input type="date" id="secFilterDateTo" onchange="renderSecurityLogs()" style="width:100%;margin:4px 0 0">
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:16px">
+      <div id="secLogsTableContent"></div>
+    </div>
+  `);
+
+  renderSecurityLogs();
+}
+
+function _getFilteredSecurityLogs(){
+  const searchQ = ($("secSearch")?.value || "").toLowerCase().trim();
+  const eventF = $("secFilterEvent")?.value || "ALL";
+  const dateFromVal = $("secFilterDateFrom")?.value || "";
+  const dateToVal = $("secFilterDateTo")?.value || "";
+  const dFrom = dateFromVal ? new Date(dateFromVal + "T00:00:00") : null;
+  const dTo = dateToVal ? new Date(dateToVal + "T23:59:59") : null;
+
+  return (securityLogsCache || []).filter(x => {
+    if(eventF !== "ALL" && x.event_type !== eventF) return false;
+    const ts = new Date(x.created_at);
+    if(dFrom && ts < dFrom) return false;
+    if(dTo && ts > dTo) return false;
+    if(searchQ){
+      const name = _securityLogDisplayName(x).toLowerCase();
+      if(!name.includes(searchQ)) return false;
+    }
+    return true;
+  });
+}
+
+function _securityLogDisplayName(x){
+  if(x.event_type === "impersonate_start") return `${x.admin?.name||"Admin"} → ${x.target?.name || x.profiles?.name || x.attempted_identifier || "-"}`;
+  if(x.event_type === "impersonate_end") return x.profiles?.name || x.attempted_identifier || "Admin";
+  return x.profiles?.name || x.attempted_identifier || "-";
+}
+
+function renderSecurityLogs(){
+  const container = $("secLogsTableContent");
+  if(!container) return;
+  const filtered = _getFilteredSecurityLogs();
+
+  if(!filtered.length){
+    container.innerHTML = `<div class="card empty" style="text-align:center;padding:30px">No security events found.</div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="tablewrap" style="overflow-x:auto">
+      <table class="table">
+        <thead><tr><th>Date & Time</th><th>Event</th><th>User</th><th>Employee ID</th><th>Status</th></tr></thead>
+        <tbody>
+          ${filtered.map(x => `
+            <tr>
+              <td style="white-space:nowrap">${new Date(x.created_at).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"})}</td>
+              <td><span class="badge ${x.event_type==='login_failed'?'r':(x.event_type==='login_success'?'g':'o')}">${SECURITY_EVENT_LABELS[x.event_type]||x.event_type}</span></td>
+              <td><b>${esc(_securityLogDisplayName(x))}</b></td>
+              <td>${esc(x.profiles?.employee_id || "-")}</td>
+              <td>${x.event_type==='login_failed' ? '❌ Failed' : '✅ Success'}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Showing ${filtered.length} of ${securityLogsCache.length} events (most recent 2000 loaded).</p>
+  `;
+}
+
+function exportSecurityLogsCSV(){
+  const filtered = _getFilteredSecurityLogs();
+  if(!filtered.length) return alert("No security events to export for the current filters.");
+
+  let csv = "Date & Time,Event,User,Employee ID,Status\n";
+  filtered.forEach(x => {
+    const row = [
+      new Date(x.created_at).toLocaleString("en-IN"),
+      SECURITY_EVENT_LABELS[x.event_type] || x.event_type,
+      _securityLogDisplayName(x),
+      x.profiles?.employee_id || "",
+      x.event_type==='login_failed' ? "Failed" : "Success"
+    ];
+    csv += row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",") + "\n";
+  });
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `STLP_SecurityLogs_${Date.now()}.csv`;
+  a.click();
+}
+
+// --- TRAINERS MODULE ---
+async function trainersPage(){
+  const [tr, ur] = await Promise.all([
+    sb.from("trainers").select("*, profiles!trainers_user_id_fkey(name,employee_id,department,designation)").order("created_at",{ascending:false}),
+    sb.from("profiles").select("id,name,employee_id,department").eq("role","user").order("name")
+  ]);
+
+  if(tr.error) return layout("trainers","Trainers",`<div class="card"><b>Error:</b> ${esc(tr.error.message)}</div>`);
+
+  const trainersList = tr.data || [];
+  const allUsers = ur.data || [];
+  window._trainersCache = trainersList;
+  window._trainerEligibleUsers = allUsers.filter(u => !trainersList.some(t => t.user_id === u.id));
+
+  layout("trainers","Trainers",`
+    <p class="muted">Certified trainers directory. Every trainer must already have a user account — Admin can add or remove trainer status anytime without affecting their normal login.</p>
+    <div class="actions" style="margin-bottom:16px">
+      <button class="btn blue" onclick="addTrainerForm()">+ Add Trainer</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+      ${trainersList.map(t => `
+        <div class="card">
+          <h3 style="margin:0">${esc(t.profiles?.name||"-")}</h3>
+          <p class="muted" style="margin:4px 0">${esc(t.profiles?.employee_id||"-")} · ${esc(t.profiles?.department||"-")}</p>
+          <p style="font-size:13px;margin:6px 0">📞 ${esc(t.contact_number||"-")}</p>
+          <p style="font-size:13px;margin:6px 0">🎓 Experience: ${esc(t.experience||"-")}</p>
+          <p style="font-size:12.5px;color:var(--slate-500);margin:6px 0">📎 ${t.certificate_paths?.length||0} certificate(s)</p>
+          <div class="actions" style="margin-top:10px">
+            ${(t.certificate_paths||[]).map((p,i) => `<button class="btn light" onclick="viewTrainerCertificate('${p}')">View Cert ${i+1}</button>`).join("")}
+          </div>
+          <div class="actions" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--slate-100)">
+            <button class="btn light" style="color:#d32f2f" onclick="removeTrainer('${t.id}','${esc(t.profiles?.name||"this trainer")}')">Remove Trainer</button>
+          </div>
+        </div>
+      `).join("") || '<div class="card empty">No trainers added yet.</div>'}
+    </div>
+  `);
+}
+
+function addTrainerForm(){
+  const eligible = window._trainerEligibleUsers || [];
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal">
+        <h2>+ Add Trainer</h2>
+        <label>Select User *</label>
+        <select id="trUser">
+          <option value="">-- Select an existing user --</option>
+          ${eligible.map(u => `<option value="${u.id}">${esc(u.name)} (${esc(u.employee_id||"-")})</option>`).join("")}
+        </select>
+        ${!eligible.length ? '<p class="muted" style="font-size:12.5px">All users are already trainers, or no users exist yet.</p>' : ""}
+        <div class="formgrid" style="margin-top:10px">
+          <div><label>Experience</label><input id="trExp" placeholder="e.g. 5 years"></div>
+          <div><label>Contact Number</label><input id="trPhone" placeholder="e.g. 98xxxxxxxx"></div>
+        </div>
+        <div class="fullfield">
+          <label>Certificate(s)</label>
+          <input id="trCerts" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" multiple>
+        </div>
+        <div class="actions" style="margin-top:15px">
+          <button class="btn blue" id="trSubmitBtn" onclick="saveTrainer()">Save Trainer</button>
+          <button class="btn light" onclick="closeModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function saveTrainer(){
+  const userId = $("trUser").value;
+  if(!userId) return alert("Please select a user.");
+
+  const btn = $("trSubmitBtn");
+  if(btn){ btn.disabled = true; btn.textContent = "Saving..."; }
+
+  const files = Array.from($("trCerts").files || []);
+  const certPaths = [];
+
+  if(files.length){
+    showUploadOverlay(`Uploading certificate 1 of ${files.length}...`);
+    for(let i=0;i<files.length;i++){
+      const f = files[i];
+      const safe = f.name.replace(/[^a-zA-Z0-9._-]/g,"_");
+      const path = `trainer/${userId}/${Date.now()}_${i}_${safe}`;
+      const up = await uploadFileWithProgress("trainer-certificates", path, f, (pct)=>{
+        setUploadProgress(pct);
+      });
+      if(up.error){
+        hideUploadOverlay();
+        if(btn){ btn.disabled = false; btn.textContent = "Save Trainer"; }
+        return alert(`Certificate upload failed: ${up.error.message}`);
+      }
+      certPaths.push(path);
+    }
+    hideUploadOverlay();
+  }
+
+  const r = await sb.from("trainers").insert({
+    user_id: userId,
+    experience: $("trExp").value.trim(),
+    contact_number: $("trPhone").value.trim(),
+    certificate_paths: certPaths,
+    added_by: profile.id
+  });
+
+  if(r.error){
+    if(btn){ btn.disabled = false; btn.textContent = "Save Trainer"; }
+    return alert(r.error.message);
+  }
+
+  closeModal();
+  route("trainers");
+}
+
+async function removeTrainer(id, name){
+  if(!confirm(`Remove ${name} as a trainer? Their normal user login will not be affected.`)) return;
+  const r = await sb.from("trainers").delete().eq("id", id);
+  if(r.error) return alert(r.error.message);
+  route("trainers");
+}
+
+async function viewTrainerCertificate(path){
+  const sr = await sb.storage.from("trainer-certificates").createSignedUrl(path, 3600);
+  if(sr.error) return alert(sr.error.message);
+  window.open(sr.data.signedUrl, "_blank");
+}
+
 async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
-  return ({dash, users, train:training, sop:sopPage, notes:notifications, results:assessmentResults, progress, reports, history, feedback:feedbackPage}[x] || dash)();
+  currentRoute = x;
+  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage}[x] || dash)();
 }
 
 // --- SOP MODULE ---
@@ -3935,7 +4784,7 @@ async function sopPage(){
     sb.from("sop_folders").select("*").order("name",{ascending:true})
   ]);
 
-  if(r.error) return layout("sop","SOP's",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
+  if(r.error) return layout("sop","Library",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
 
   const all = r.data || [];
   const folders = fr.data || [];
@@ -3972,7 +4821,7 @@ async function sopPage(){
       ${admin ? `<button class="btn ghost" onclick="createSopFolderPrompt()">+ New Folder</button>` : ""}
     </div>`;
 
-  layout("sop","SOP's",`
+  layout("sop","Library",`
     <div class="actions" style="margin-bottom:14px;justify-content:space-between">
       <div class="muted">${admin ? "Review SOPs uploaded by users, then approve to publish them for everyone. Organize them into folders, hide, or delete as needed." : "Browse approved SOPs, or upload a new one for admin review."}</div>
       <button class="btn blue" onclick="sopUploadForm()">+ Upload SOP</button>
@@ -4165,3 +5014,12 @@ async function rejectSop(id){
     r.data.session ? start() : loginPage();
   } else loginPage();
 })();
+
+// --- PWA: register service worker (needed for iOS/Android Push Notifications) ---
+if("serviceWorker" in navigator){
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("service-worker.js").catch(err => {
+      console.warn("Service worker registration failed:", err);
+    });
+  });
+}
