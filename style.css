@@ -1,5 +1,5 @@
 /* =========================================================================
-   STLP — Your Organization Name · Safety Training & Learning Portal
+   STLP — Talwandi Sabo Thermal Plant · Safety Training & Learning Portal
    Corporate HSE / Safety Management visual system
    ========================================================================= */
 
@@ -111,6 +111,15 @@ input,select,textarea{
 input:focus,select:focus,textarea:focus{
   outline:none;border-color:var(--teal-500);box-shadow:0 0 0 3px rgba(18,151,159,.15);
 }
+
+/* Assessment / Pre-Test radio options — keep tick right next to its option text
+   (global input{width:100%} above would otherwise stretch radios full-width). */
+.optrow{display:flex;align-items:center;gap:8px;margin:8px 0;font-weight:400;cursor:pointer}
+input.assess-radio{
+  width:auto;flex:0 0 auto;padding:0;border:none;background:transparent;
+  accent-color:var(--teal-500);cursor:pointer;
+}
+.optrow span{flex:1}
 
 /* ---------------------------- Sidebar ---------------------------- */
 .side{
