@@ -527,6 +527,100 @@ function _renderHeatmap(attempts){
     <div class="heatmap-legend">Less <i data-lvl="0" style="background:#eef2f7"></i><i data-lvl="1" style="background:#bfe9df"></i><i data-lvl="2" style="background:#7ed0c2"></i><i data-lvl="3" style="background:#3bb0a3"></i><i data-lvl="4" style="background:#0e7c86"></i> More</div>`;
 }
 
+// --- TRAINING SCHEDULE CALENDAR (admin dashboard) ---
+let _calYear = null, _calMonth = null, _calDataByDate = {};
+
+function _calBuildMap(trainings){
+  const map = {};
+  trainings.forEach(t=>{
+    if(!t.training_date) return;
+    const key = String(t.training_date).slice(0,10);
+    if(!map[key]) map[key] = [];
+    map[key].push(t);
+  });
+  return map;
+}
+
+function _calRenderGrid(){
+  const now = new Date();
+  if(_calYear===null){ _calYear = now.getFullYear(); _calMonth = now.getMonth(); }
+  const first = new Date(_calYear, _calMonth, 1);
+  const startDow = first.getDay();
+  const daysInMonth = new Date(_calYear, _calMonth+1, 0).getDate();
+  const monthLabel = first.toLocaleDateString("en-IN",{month:"long",year:"numeric"});
+  const todayKey = new Date(now.getFullYear(),now.getMonth(),now.getDate()).toISOString().slice(0,10);
+
+  const dows = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  let cells = dows.map(d=>`<div class="cal-dow">${d}</div>`).join("");
+  for(let i=0;i<startDow;i++) cells += `<div class="cal-day cal-empty"></div>`;
+  for(let day=1; day<=daysInMonth; day++){
+    const dateObj = new Date(_calYear, _calMonth, day);
+    const key = dateObj.toISOString().slice(0,10);
+    const items = _calDataByDate[key] || [];
+    const isToday = key === todayKey;
+    const hasTr = items.length>0;
+    cells += `<div class="cal-day ${isToday?"cal-today":""} ${hasTr?"cal-has":""}" onclick="openCalendarDay('${key}')">
+      <span class="cal-num">${day}</span>
+      ${hasTr ? `<span class="cal-badge">${items.length} training${items.length>1?"s":""}</span>` : `<span class="cal-plus">+</span>`}
+    </div>`;
+  }
+
+  return `
+    <div class="cal-head">
+      <span class="cal-title">🗓️ ${esc(monthLabel)}</span>
+      <div class="cal-nav">
+        <button class="cal-today-btn" onclick="calGoToday()">Today</button>
+        <button class="cal-nav-btn" onclick="calNavMonth(-1)">‹</button>
+        <button class="cal-nav-btn" onclick="calNavMonth(1)">›</button>
+      </div>
+    </div>
+    <div class="cal-grid">${cells}</div>
+  `;
+}
+
+function _calRefresh(){
+  const el = $("trainingCalGrid");
+  if(el) el.innerHTML = _calRenderGrid();
+}
+
+function calNavMonth(delta){
+  _calMonth += delta;
+  if(_calMonth<0){ _calMonth=11; _calYear--; }
+  if(_calMonth>11){ _calMonth=0; _calYear++; }
+  _calRefresh();
+}
+
+function calGoToday(){
+  const now = new Date();
+  _calYear = now.getFullYear(); _calMonth = now.getMonth();
+  _calRefresh();
+}
+
+function openCalendarDay(dateStr){
+  const items = _calDataByDate[dateStr] || [];
+  const dateLabel = new Date(dateStr+"T00:00:00").toLocaleDateString("en-IN",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal">
+        <h2>${esc(dateLabel)}</h2>
+        ${items.length ? items.map(t=>`
+          <div class="cal-daylist-item">
+            <div>
+              <b>${esc(t.title)}</b><br>
+              <span class="muted" style="font-size:12px">${esc(t.category||"General")} · ${t.published?"Published":"Draft"}</span>
+            </div>
+            <button class="btn light" onclick="closeModal();trainingForm('${t.id}')">Edit</button>
+          </div>
+        `).join("") : `<p class="muted">No training scheduled on this date yet.</p>`}
+        <div class="actions" style="margin-top:15px">
+          <button class="btn blue" onclick="closeModal();trainingForm(null,'${dateStr}')">+ Add Training on this date</button>
+          <button class="btn light" onclick="closeModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
 async function dash(){
   if(profile.role==="admin"){
     const [uRes, tRes, attRes, progRes] = await Promise.all([
@@ -549,6 +643,8 @@ async function dash(){
       const uniqueSet = new Set(attempts.filter(a=>a.passed===true).map(x=>`${x.user_id}_${x.training_id}`));
       completedCount = uniqueSet.size;
     }
+
+    _calDataByDate = _calBuildMap(allTrainings);
 
     const {matrixData, totals} = _buildComplianceMatrix(employees, activeTrainings, attempts, progresses);
     const overallCompliancePct = employees.length>0 ? Math.round((totals.COMPLETE/employees.length)*100) : 0;
@@ -647,9 +743,7 @@ async function dash(){
 
       <div class="chart-row cols-1" style="grid-template-columns:1fr">
         <div class="chart-card">
-          <h4>🗓️ Training Activity Calendar</h4>
-          <span class="chart-sub">Assessment attempts per day · last 12 weeks</span>
-          ${_renderHeatmap(attempts)}
+          <div id="trainingCalGrid">${_calRenderGrid()}</div>
         </div>
       </div>
 
@@ -2195,11 +2289,11 @@ function renderUserTrainingsCards() {
   }).join("");
 }
 
-async function trainingForm(id){
+async function trainingForm(id, presetDate){
   let t = {
     title:"", category:"", description:"", duration:"", validity:"1 Year",
     material_url:"", assessment_required:false, passing_marks:90,
-    allowed_attempts:1, published:false, target_departments:null
+    allowed_attempts:1, published:false, target_departments:null, training_date:presetDate||""
   };
 
   if(id){
@@ -2207,6 +2301,8 @@ async function trainingForm(id){
     if(r.error) return alert(r.error.message);
     t = r.data;
   }
+
+  const tdateVal = t.training_date ? String(t.training_date).slice(0,10) : (presetDate||"");
 
   const deptRes = await sb.from("profiles").select("department").eq("role","user");
   const allDepts = [...new Set((deptRes.data||[]).map(u=>u.department).filter(Boolean))].sort();
@@ -2223,6 +2319,7 @@ async function trainingForm(id){
           <div><label>Duration</label><input id="td" value="${esc(t.duration||"")}"></div>
           <div class="fullfield"><label>Description</label><textarea id="tdesc" rows="4">${esc(t.description||"")}</textarea></div>
           <div><label>Validity</label><input id="tv" value="${esc(t.validity||"1 Year")}"></div>
+          <div><label>Training Date</label><input id="ttdate" type="date" value="${esc(tdateVal)}"></div>
           <div class="fullfield">
             <label>Assign To (Departments)</label>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -2287,6 +2384,7 @@ async function saveTraining(id){
     allowed_attempts: Math.max(1, parseInt($("tatt").value||1)),
     published: $("tpub").value === "true",
     target_departments: deptAll ? null : (selectedDepts.length ? selectedDepts : null),
+    training_date: $("ttdate").value || null,
     updated_at: new Date().toISOString()
   };
 
