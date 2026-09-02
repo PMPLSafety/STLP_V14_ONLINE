@@ -240,7 +240,7 @@ async function impersonateUser(targetUserId, targetName){
     admin_name: profile.name
   }));
 
-  const otp = await sb.auth.verifyOtp({ email: body.email, token: body.hashed_token, type: "magiclink" });
+  const otp = await sb.auth.verifyOtp({ token_hash: body.hashed_token, type: "magiclink" });
   if(otp.error){
     sessionStorage.removeItem("stlp_admin_session");
     return alert("Login as User failed: " + otp.error.message);
