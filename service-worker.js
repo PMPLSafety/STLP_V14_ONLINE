@@ -26,7 +26,18 @@ self.addEventListener("push", (event) => {
     data: { url: data.url || "./index.html" }
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    self.registration.showNotification(title, options).then(() => {
+      // App Badge (the little number on the Home Screen icon). Supported on
+      // iOS 16.4+ / Android for installed (Home-Screen) PWAs. We count the
+      // currently-visible (not-yet-tapped) notifications as the badge number.
+      if ("setAppBadge" in self.registration) {
+        return self.registration.getNotifications().then((notifs) => {
+          return self.registration.setAppBadge(notifs.length);
+        });
+      }
+    })
+  );
 });
 
 // Fired when the user taps the notification — bring the app to the foreground.
@@ -35,15 +46,29 @@ self.addEventListener("notificationclick", (event) => {
   const targetUrl = (event.notification.data && event.notification.data.url) || "./index.html";
 
   event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if (client.url.includes(location.origin) && "focus" in client) {
-          return client.focus();
+    Promise.resolve()
+      .then(() => {
+        // Update the badge to reflect the notifications still left unread.
+        if ("setAppBadge" in self.registration) {
+          return self.registration.getNotifications().then((notifs) => {
+            return notifs.length > 0
+              ? self.registration.setAppBadge(notifs.length)
+              : self.registration.clearAppBadge();
+          });
         }
-      }
-      if (self.clients.openWindow) {
-        return self.clients.openWindow(targetUrl);
-      }
-    })
+      })
+      .then(() =>
+        self.clients.matchAll({ type: "window", includeUncontrolled: true })
+      )
+      .then((clientList) => {
+        for (const client of clientList) {
+          if (client.url.includes(location.origin) && "focus" in client) {
+            return client.focus();
+          }
+        }
+        if (self.clients.openWindow) {
+          return self.clients.openWindow(targetUrl);
+        }
+      })
   );
 });
