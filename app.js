@@ -3325,11 +3325,21 @@ async function notifications(){
       <div class="card" style="margin-bottom:12px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
           <h3 style="margin:0">${esc(n.title)}</h3>
-          <span class="muted" style="font-size:12px;white-space:nowrap">🕐 ${n.created_at ? new Date(n.created_at).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : "-"}</span>
+          <div style="display:flex;align-items:center;gap:10px;white-space:nowrap">
+            <span class="muted" style="font-size:12px">🕐 ${n.created_at ? new Date(n.created_at).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : "-"}</span>
+            ${admin ? `<button class="btn light" style="padding:4px 10px;font-size:12px;color:#c0392b" onclick="deleteNotification('${n.id}')">🗑️ Delete</button>` : ""}
+          </div>
         </div>
         <p style="margin:8px 0 0">${esc(n.message)}</p>
       </div>`).join("")||'<div class="card empty">No notifications.</div>'}</div>
   `);
+}
+
+async function deleteNotification(id){
+  if(!confirm("Delete this notification? This cannot be undone.")) return;
+  const r = await sb.from("notifications").delete().eq("id", id);
+  if(r.error) return alert("Could not delete: " + r.error.message);
+  notifications();
 }
 
 function addNotificationForm(){
