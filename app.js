@@ -240,7 +240,7 @@ async function impersonateUser(targetUserId, targetName){
     admin_name: profile.name
   }));
 
-  const otp = await sb.auth.verifyOtp({ token_hash: body.hashed_token, type: "magiclink" });
+  const otp = await sb.auth.verifyOtp({ token_hash: body.hashed_token, type: "email" });
   if(otp.error){
     sessionStorage.removeItem("stlp_admin_session");
     return alert("Login as User failed: " + otp.error.message);
@@ -3304,6 +3304,17 @@ async function assessmentResults(){
 
 async function notifications(){
   const admin = profile.role === "admin";
+
+  // Clear the Home Screen app badge + any pending OS notifications whenever
+  // the user opens this page (covers the case where they opened the app
+  // icon directly instead of tapping a push notification).
+  if("clearAppBadge" in navigator) navigator.clearAppBadge().catch(()=>{});
+  if("serviceWorker" in navigator){
+    navigator.serviceWorker.ready.then(reg =>
+      reg.getNotifications().then(list => list.forEach(n => n.close()))
+    ).catch(()=>{});
+  }
+
   const r = await sb.from("notifications").select("*").order("created_at",{ascending:false});
   layout("notes","Notifications",`
     <div class="actions">
