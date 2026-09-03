@@ -690,7 +690,13 @@ async function dash(){
     const hasScoreData = monthlyScores.some(v=>v!==null);
 
     const html = `
-      <div class="kpi-grid">
+      <div class="chart-row cols-1" style="grid-template-columns:1fr">
+        <div class="chart-card">
+          <div id="trainingCalGrid">${_calRenderGrid()}</div>
+        </div>
+      </div>
+
+      <div class="kpi-grid" style="margin-top:22px">
         ${kpi("👥","c1","Total Employees",employees.length)}
         ${kpi("📚","c6","Active Trainings",activeTrainings.length,`${publishedTrainings.length} published`)}
         ${kpi("✅","c3","Completed",completedCount)}
@@ -738,12 +744,6 @@ async function dash(){
           <h4>🎓 Certificate Status</h4>
           <span class="chart-sub">Across published trainings requiring assessment</span>
           <div class="chart-box short">${requiredTrainings.length?'<canvas id="chDonut"></canvas>':'<div class="chart-empty">No assessment-required trainings published yet.</div>'}</div>
-        </div>
-      </div>
-
-      <div class="chart-row cols-1" style="grid-template-columns:1fr">
-        <div class="chart-card">
-          <div id="trainingCalGrid">${_calRenderGrid()}</div>
         </div>
       </div>
 
@@ -1856,6 +1856,7 @@ async function training(){
               <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
                 <h3 style="margin:0">${esc(t.title)}</h3>
                 <span class="badge ${t.archived ? "o" : t.published ? "g" : "o"}">${t.archived ? "Archived" : t.published ? "Published" : "Draft"}</span>
+                ${t.meet_link ? `<span class="badge b">🎥 Live Meet Set</span>` : ""}
               </div>
               <p class="muted" style="margin:4px 0">${esc(t.category||"General")} · Duration: ${esc(t.duration||"1 Hour")} · Validity: ${esc(t.validity||"1 Year")}</p>
               <p style="margin:4px 0"><span class="badge b">🏭 ${t.target_departments && t.target_departments.length ? esc(t.target_departments.join(", ")) : "All Departments"}</span></p>
@@ -2264,6 +2265,7 @@ function renderUserTrainingsCards() {
     } else {
       actionButtonHtml = `<button class="btn blue" onclick="openTraining('${t.id}')">Open / Start Training</button>`;
     }
+    const meetBtnHtml = t.meet_link ? `<a class="btn success" href="${esc(t.meet_link)}" target="_blank" rel="noopener">🎥 Join Meeting</a>` : "";
 
     return `
       <div class="card item" style="margin-bottom:16px">
@@ -2281,12 +2283,42 @@ function renderUserTrainingsCards() {
             ${t.computedStatus === 'PENDING' ? `<div><b>Status:</b> Pending Completion</div>` : ''}
           </div>
         </div>
-        <div class="actions" style="align-self:center">
+        <div class="actions" style="align-self:center;flex-direction:column;gap:8px">
+          ${meetBtnHtml}
           ${actionButtonHtml}
         </div>
       </div>
     `;
   }).join("");
+}
+
+async function generateGoogleMeetLink(){
+  const btn = $("tmeetGenBtn");
+  const input = $("tmeet");
+  const titleVal = ($("tt")?.value || "").trim() || "STLP Training";
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Generating…";
+  try{
+    const s = (await sb.auth.getSession()).data.session;
+    if(!s){ alert("Session expired. Please log in again."); return; }
+    const r = await fetch(`${window.SUPABASE_URL}/functions/v1/google-meet-oauth?action=create`, {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Authorization":"Bearer "+s.access_token },
+      body: JSON.stringify({ title: titleVal })
+    });
+    const data = await r.json();
+    if(!r.ok || !data.success || !data.meetingUri){
+      alert("Could not generate Meet link: " + (data.error || "Unknown error"));
+      return;
+    }
+    input.value = data.meetingUri;
+  }catch(e){
+    alert("Could not generate Meet link: " + e.message);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
 }
 
 async function trainingForm(id, presetDate){
@@ -2339,6 +2371,14 @@ async function trainingForm(id, presetDate){
             <input id="tfile" type="file" accept=".ppt,.pptx,.pdf,.png,.jpg,.jpeg,.webp,.mp4,.webm,.mov">
           </div>
           <div class="fullfield"><label>YouTube / External Material URL</label><input id="tm" value="${esc((t.material_url||"").startsWith("storage:")?"":(t.material_url||""))}"></div>
+          <div class="fullfield">
+            <label>Google Meet Link (for Live Training)</label>
+            <div style="display:flex;gap:8px">
+              <input id="tmeet" value="${esc(t.meet_link||"")}" placeholder="https://meet.google.com/xxx-xxxx-xxx" style="flex:1">
+              <button type="button" class="btn light" id="tmeetGenBtn" style="white-space:nowrap" onclick="generateGoogleMeetLink()">🎥 Generate New Link</button>
+            </div>
+            <span class="muted" style="font-size:11.5px;display:block;margin-top:4px">Generates a live Google Meet link via STLP's connected Google account (Admin only).</span>
+          </div>
           <div>
             <label>Assessment Required</label>
             <select id="ta">
@@ -2385,6 +2425,7 @@ async function saveTraining(id){
     published: $("tpub").value === "true",
     target_departments: deptAll ? null : (selectedDepts.length ? selectedDepts : null),
     training_date: $("ttdate").value || null,
+    meet_link: $("tmeet").value.trim() || null,
     updated_at: new Date().toISOString()
   };
 
