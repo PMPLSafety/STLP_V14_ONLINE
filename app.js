@@ -4681,19 +4681,17 @@ async function securityLogsPage(){
 
   if(r.error) return layout("seclogs","Security Logs",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
 
-  const rows = r.data || [];
+  const rows = (r.data || []).filter(x => x.event_type !== "impersonate_start");
   securityLogsCache = rows;
 
   const totalCount = rows.length;
   const failedCount = rows.filter(x=>x.event_type==="login_failed").length;
-  const impersonateCount = rows.filter(x=>x.event_type==="impersonate_start").length;
 
   layout("seclogs","Security Logs",`
     <p class="muted">Login, logout, and Admin "Login as User" activity — who logged in, who failed, who logged out.</p>
     <div class="grid" style="margin-bottom:20px">
       ${metric("Total Events", totalCount)}
       ${metric("Failed Logins", failedCount)}
-      ${metric("Admin Impersonations", impersonateCount)}
     </div>
 
     <div class="card" style="margin-bottom:16px;padding:16px">
@@ -4710,7 +4708,7 @@ async function securityLogsPage(){
           <label style="font-size:12px;font-weight:bold">Event</label>
           <select id="secFilterEvent" onchange="renderSecurityLogs()" style="width:100%;margin:4px 0 0">
             <option value="ALL">All Events</option>
-            ${Object.entries(SECURITY_EVENT_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}
+            ${Object.entries(SECURITY_EVENT_LABELS).filter(([k])=>k!=="impersonate_start").map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}
           </select>
         </div>
         <div>
