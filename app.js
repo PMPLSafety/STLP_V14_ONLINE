@@ -316,7 +316,7 @@ async function returnToAdmin(){
 const MENU_ICONS = {
   dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
   progress:"📈", reports:"📄", history:"🗂️", seclogs:"🔒", feedback:"💬", sop:"📁", trainers:"🎓",
-  attendance:"🎥",
+  attendance:"🎥", certificates:"📜",
   _history_group:"🕒"
 };
 
@@ -366,10 +366,10 @@ function renderSideMenu(menu, admin, active){
 function layout(active, title, html){
   let admin = profile.role === "admin";
   let menu = admin ?
-    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["attendance","Meeting Attendance"],
+    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["certificates","Certificates"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["attendance","Meeting Attendance"],
       ["_history_group","History",[["history","Audit Logs"],["seclogs","Security Logs"]]],
       ["feedback","Feedback"]] :
-    [["dash","Dashboard"],["train","My Trainings"],["sop","Library"],["notes","Notifications"],["results","Assessments"],["history","History"]];
+    [["dash","Dashboard"],["train","My Trainings"],["certificates","My Certificates"],["sop","Library"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
   const collapsed = _sidebarCollapsedPref();
   const initials = (profile.name||"?").trim().split(/\s+/).map(w=>w[0]).slice(0,2).join("").toUpperCase();
@@ -2352,7 +2352,8 @@ async function trainingForm(id, presetDate){
   let t = {
     title:"", category:"", description:"", duration:"", validity:"1 Year",
     material_url:"", assessment_required:false, passing_marks:90,
-    allowed_attempts:1, published:false, target_departments:null, training_date:presetDate||""
+    allowed_attempts:1, published:false, target_departments:null, training_date:presetDate||"",
+    certificate_validity_months:null, certificate_template_id:null
   };
 
   if(id){
@@ -2367,6 +2368,13 @@ async function trainingForm(id, presetDate){
   const allDepts = [...new Set((deptRes.data||[]).map(u=>u.department).filter(Boolean))].sort();
   const selectedDepts = new Set(t.target_departments || []);
   const isAllDepts = !t.target_departments || t.target_departments.length === 0;
+
+  // Certificates module: templates available to this training are either "reusable"
+  // (template.training_id is null) or already scoped specifically to this training.
+  let tplQuery = sb.from("certificate_templates").select("id,template_name,training_id,is_default").order("template_name");
+  tplQuery = id ? tplQuery.or(`training_id.is.null,training_id.eq.${id}`) : tplQuery.is("training_id", null);
+  const tplRes = await tplQuery;
+  const availableTemplates = tplRes.data || [];
 
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal">
@@ -2416,6 +2424,21 @@ async function trainingForm(id, presetDate){
           <div><label>Passing Marks (%)</label><input id="tp" type="number" min="1" max="100" value="${t.passing_marks||90}"></div>
           <div><label>Allowed Attempts</label><input id="tatt" type="number" min="1" value="${t.allowed_attempts||1}"></div>
           <div>
+            <label>Certificate Validity (months)</label>
+            <input id="tcvm" type="number" min="0" placeholder="Blank = never expires" value="${t.certificate_validity_months ?? ""}">
+          </div>
+          <div>
+            <label>Certificate Template</label>
+            <select id="tctpl">
+              <option value="">-- None (certificate stays Pending) --</option>
+              ${availableTemplates.map(tpl => `
+                <option value="${tpl.id}" ${t.certificate_template_id===tpl.id?"selected":""}>
+                  ${esc(tpl.template_name)}${tpl.is_default?" (Default)":""}${tpl.training_id?"":" — Reusable"}
+                </option>`).join("")}
+            </select>
+            <span class="muted" style="font-size:11.5px;display:block;margin-top:4px">Manage formats under Certificates &gt; Certificate Format Designer.</span>
+          </div>
+          <div>
             <label>Status</label>
             <select id="tpub">
               <option value="false" ${!t.published?"selected":""}>Draft</option>
@@ -2453,6 +2476,8 @@ async function saveTraining(id){
     target_departments: deptAll ? null : (selectedDepts.length ? selectedDepts : null),
     training_date: $("ttdate").value || null,
     meet_link: $("tmeet").value.trim() || null,
+    certificate_validity_months: $("tcvm").value.trim() === "" ? null : Math.max(0, parseInt($("tcvm").value)),
+    certificate_template_id: $("tctpl").value || null,
     updated_at: new Date().toISOString()
   };
 
@@ -2470,6 +2495,13 @@ async function saveTraining(id){
   }
 
   if(r.error) return alert(r.error.message);
+
+  // Auto in-app + push notification when a training is newly created AND published,
+  // using the existing notifications table/push pipeline (same one "+ Add Notification" uses).
+  // No admin action needed, no new system — just an automatic insert into `notifications`.
+  if(!id && payload.published){
+    notifyNewTrainingAvailable(payload.title, payload.target_departments).catch(()=>{});
+  }
 
   if(file){
     const safe = file.name.replace(/[^a-zA-Z0-9._-]/g,"_");
@@ -2493,6 +2525,12 @@ async function saveTraining(id){
 async function togglePublish(id, value){
   const r = await sb.from("trainings").update({published:value, updated_at:new Date().toISOString()}).eq("id",id);
   if(r.error) return alert(r.error.message);
+
+  if(value){
+    const t = await sb.from("trainings").select("title,target_departments").eq("id",id).single();
+    if(!t.error) notifyNewTrainingAvailable(t.data.title, t.data.target_departments).catch(()=>{});
+  }
+
   route("train");
 }
 
@@ -3482,19 +3520,24 @@ async function notifications(){
   }
 
   const r = await sb.from("notifications").select("*").order("created_at",{ascending:false});
+  const myDept = (profile.department || "").trim();
+  const visibleNotifications = admin ? (r.data||[]) : (r.data||[]).filter(n =>
+    !n.target_departments || n.target_departments.length === 0 || n.target_departments.includes(myDept)
+  );
   layout("notes","Notifications",`
     <div class="actions">
       ${admin ? `<button class="btn blue" onclick="addNotificationForm()">+ Add Notification</button>` : ""}
       <button class="btn light" id="pushEnableBtn" onclick="enablePushNotifications()">🔔 Enable Notifications</button>
     </div>
-    <div style="margin-top:16px">${(r.data||[]).map(n=>`
+    <div style="margin-top:16px">${visibleNotifications.map(n=>`
       <div class="card" style="margin-bottom:12px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
           <h3 style="margin:0">${esc(n.title)}</h3>
           <span class="muted" style="font-size:12px;white-space:nowrap">🕐 ${n.created_at ? new Date(n.created_at).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : "-"}</span>
         </div>
         <p style="margin:8px 0 0">${esc(n.message)}</p>
-        ${admin ? `<div style="display:flex;justify-content:flex-end;margin-top:10px">
+        ${admin ? `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+          <span class="badge b">🏭 ${n.target_departments && n.target_departments.length ? esc(n.target_departments.join(", ")) : "All Departments"}</span>
           <button class="btn light" style="padding:4px 10px;font-size:12px;color:#c0392b" onclick="deleteNotification('${n.id}')">🗑️ Delete</button>
         </div>` : ""}
       </div>`).join("")||'<div class="card empty">No notifications.</div>'}</div>
@@ -3508,21 +3551,60 @@ async function deleteNotification(id){
   notifications();
 }
 
-function addNotificationForm(){
+async function addNotificationForm(){
+  const deptRes = await sb.from("profiles").select("department").eq("role","user");
+  const allDepts = [...new Set((deptRes.data||[]).map(u=>u.department).filter(Boolean))].sort();
+
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal"><div class="modal">
       <h2>Add Notification</h2>
       <label>Title</label><input id="ntitle">
       <label>Message</label><textarea id="nmsg" rows="4"></textarea>
+      <div class="fullfield" style="margin-top:10px">
+        <label>Send To (Departments)</label>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <input type="checkbox" id="ndeptAll" style="width:auto" checked onchange="document.querySelectorAll('.ndept-chk').forEach(c=>{c.disabled=this.checked; if(this.checked)c.checked=false;})">
+          <label style="margin:0;font-weight:600" for="ndeptAll">All Departments</label>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px 18px;padding:10px 12px;border:1.5px solid var(--slate-200);border-radius:10px;max-height:140px;overflow:auto">
+          ${allDepts.length ? allDepts.map(d=>`
+            <label style="display:flex;align-items:center;gap:6px;font-weight:500;margin:0;font-size:13.5px">
+              <input type="checkbox" class="ndept-chk" style="width:auto" value="${esc(d)}" disabled>
+              ${esc(d)}
+            </label>`).join("") : '<span class="muted" style="font-size:12.5px">No departments found yet — add users with a Department first.</span>'}
+        </div>
+      </div>
       <div class="actions" style="margin-top:15px"><button class="btn blue" onclick="saveNotification()">Publish</button><button class="btn light" onclick="closeModal()">Cancel</button></div>
     </div></div>
   `);
 }
 
 async function saveNotification(){
-  await sb.from("notifications").insert({ title: $("ntitle").value.trim(), message: $("nmsg").value.trim() });
+  const deptAll = $("ndeptAll")?.checked;
+  const selectedDepts = Array.from(document.querySelectorAll(".ndept-chk:checked")).map(c=>c.value);
+  await sb.from("notifications").insert({
+    title: $("ntitle").value.trim(),
+    message: $("nmsg").value.trim(),
+    target_departments: deptAll ? null : (selectedDepts.length ? selectedDepts : null)
+  });
   closeModal();
   notifications();
+}
+
+// Auto-notification for newly published trainings. Reuses the exact same
+// `notifications` table/pipeline as the admin's manual "+ Add Notification"
+// button — so it goes out via in-app + push the same way, automatically,
+// with no admin action required. target_departments mirrors the training's
+// own department targeting, so only assigned employees see/get it.
+async function notifyNewTrainingAvailable(trainingTitle, targetDepartments){
+  const deptNote = (targetDepartments && targetDepartments.length)
+    ? ` (for ${targetDepartments.join(", ")})`
+    : "";
+  return sb.from("notifications").insert({
+    title: "New Training Assigned",
+    message: `A new training "${trainingTitle}" has been added${deptNote}. Open "My Trainings" to view and complete it.`,
+    target_departments: (targetDepartments && targetDepartments.length) ? targetDepartments : null
+  });
 }
 
 // --- WEB PUSH SUBSCRIPTION (iOS 16.4+ requires "Add to Home Screen" first) ---
@@ -5101,7 +5183,7 @@ async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
   currentRoute = x;
-  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage}[x] || dash)();
+  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage, certificates:certificatesPage}[x] || dash)();
 }
 
 // --- SOP MODULE ---
