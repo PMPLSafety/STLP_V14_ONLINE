@@ -178,6 +178,32 @@ async function _logSecurityEvent(eventType, extra={}){
   }catch(e){ /* non-fatal */ }
 }
 
+// --- MEETING ATTENDANCE (Join / Rejoin / Return tracking) ---
+let _pendingMeetReturn = null; // { trainingId } while a Meet tab is presumed open
+
+async function _logMeetingEvent(trainingId, eventType){
+  try{
+    await sb.from("meeting_attendance").insert({
+      training_id: trainingId,
+      user_id: profile.id,
+      event_type: eventType
+    });
+  }catch(e){ /* non-fatal */ }
+}
+
+function joinMeeting(trainingId, url){
+  _logMeetingEvent(trainingId, "join");
+  _pendingMeetReturn = { trainingId };
+  window.open(url, "_blank", "noopener");
+}
+
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && _pendingMeetReturn && profile){
+    _logMeetingEvent(_pendingMeetReturn.trainingId, "return");
+    _pendingMeetReturn = null;
+  }
+});
+
 async function start(){
   let r = await sb.auth.getUser();
   if(!r.data.user) return loginPage();
@@ -290,6 +316,7 @@ async function returnToAdmin(){
 const MENU_ICONS = {
   dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
   progress:"📈", reports:"📄", history:"🗂️", seclogs:"🔒", feedback:"💬", sop:"📁", trainers:"🎓",
+  attendance:"🎥",
   _history_group:"🕒"
 };
 
@@ -339,7 +366,7 @@ function renderSideMenu(menu, admin, active){
 function layout(active, title, html){
   let admin = profile.role === "admin";
   let menu = admin ?
-    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],
+    [["dash","Dashboard"],["users","Users Management"],["train","Training"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["attendance","Meeting Attendance"],
       ["_history_group","History",[["history","Audit Logs"],["seclogs","Security Logs"]]],
       ["feedback","Feedback"]] :
     [["dash","Dashboard"],["train","My Trainings"],["sop","Library"],["notes","Notifications"],["results","Assessments"],["history","History"]];
@@ -2265,7 +2292,7 @@ function renderUserTrainingsCards() {
     } else {
       actionButtonHtml = `<button class="btn blue" onclick="openTraining('${t.id}')">Open / Start Training</button>`;
     }
-    const meetBtnHtml = t.meet_link ? `<a class="btn success" href="${esc(t.meet_link)}" target="_blank" rel="noopener">🎥 Join Meeting</a>` : "";
+    const meetBtnHtml = t.meet_link ? `<button type="button" class="btn success" onclick="joinMeeting('${t.id}','${esc(t.meet_link)}')">🎥 Join Meeting</button>` : "";
 
     return `
       <div class="card item" style="margin-bottom:16px">
@@ -4786,6 +4813,165 @@ function exportSecurityLogsCSV(){
   a.click();
 }
 
+// --- MEETING ATTENDANCE PAGE (admin only) ---
+let meetingAttendanceCache = [];
+let _maFilterTraining = "ALL";
+
+function _buildMeetingSessions(records){
+  const groups = {};
+  records.forEach(r=>{
+    const key = r.training_id + "|" + r.user_id;
+    if(!groups[key]) groups[key] = { trainingId:r.training_id, training:r.trainings, userId:r.user_id, user:r.profiles, events: [] };
+    groups[key].events.push(r);
+  });
+  const sessions = [];
+  Object.values(groups).forEach(g=>{
+    g.events.sort((a,b)=> new Date(a.event_at) - new Date(b.event_at));
+    let openJoin = null;
+    g.events.forEach(e=>{
+      if(e.event_type === "join"){
+        if(openJoin) sessions.push({ trainingId:g.trainingId, training:g.training, userId:g.userId, user:g.user, joinedAt:openJoin.event_at, leftAt:null });
+        openJoin = e;
+      } else if(e.event_type === "return" && openJoin){
+        sessions.push({ trainingId:g.trainingId, training:g.training, userId:g.userId, user:g.user, joinedAt:openJoin.event_at, leftAt:e.event_at });
+        openJoin = null;
+      }
+    });
+    if(openJoin) sessions.push({ trainingId:g.trainingId, training:g.training, userId:g.userId, user:g.user, joinedAt:openJoin.event_at, leftAt:null });
+  });
+  sessions.sort((a,b)=> new Date(b.joinedAt) - new Date(a.joinedAt));
+  return sessions;
+}
+
+function _maDuration(joinedAt, leftAt){
+  if(!leftAt) return "—";
+  const mins = Math.round((new Date(leftAt) - new Date(joinedAt)) / 60000);
+  if(mins < 1) return "<1 min";
+  if(mins < 60) return mins + " min";
+  return Math.floor(mins/60) + "h " + (mins%60) + "m";
+}
+
+async function meetingAttendancePage(){
+  const r = await sb.from("meeting_attendance")
+    .select("*, profiles(name,employee_id), trainings(title)")
+    .order("event_at",{ascending:false})
+    .limit(5000);
+
+  if(r.error) return layout("attendance","Meeting Attendance",`<div class="card"><b>Error:</b> ${esc(r.error.message)}</div>`);
+
+  meetingAttendanceCache = r.data || [];
+  const trainingsList = [...new Map(meetingAttendanceCache.filter(x=>x.trainings).map(x=>[x.training_id, x.trainings.title])).entries()];
+
+  layout("attendance","Meeting Attendance",`
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0;font-size:16px">Filters</h3>
+        <button class="btn blue" onclick="exportMeetingAttendanceCSV()">⬇️ Download CSV</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:12px;align-items:end">
+        <div>
+          <label style="font-size:12px;font-weight:bold">Search (name)</label>
+          <input id="maSearch" placeholder="Search user name..." oninput="renderMeetingAttendance()" style="width:100%;margin:4px 0 0">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Training</label>
+          <select id="maFilterTraining" onchange="_maFilterTraining=this.value;renderMeetingAttendance()" style="width:100%;margin:4px 0 0">
+            <option value="ALL">All Trainings</option>
+            ${trainingsList.map(([id,title])=>`<option value="${id}">${esc(title)}</option>`).join("")}
+          </select>
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Date From</label>
+          <input type="date" id="maFilterDateFrom" onchange="renderMeetingAttendance()" style="width:100%;margin:4px 0 0">
+        </div>
+        <div>
+          <label style="font-size:12px;font-weight:bold">Date To</label>
+          <input type="date" id="maFilterDateTo" onchange="renderMeetingAttendance()" style="width:100%;margin:4px 0 0">
+        </div>
+      </div>
+    </div>
+    <div class="card" style="padding:16px">
+      <div id="maTableContent"></div>
+    </div>
+  `);
+
+  renderMeetingAttendance();
+}
+
+function _getFilteredMeetingSessions(){
+  const sessions = _buildMeetingSessions(meetingAttendanceCache);
+  const searchQ = ($("maSearch")?.value || "").toLowerCase().trim();
+  const dateFromVal = $("maFilterDateFrom")?.value || "";
+  const dateToVal = $("maFilterDateTo")?.value || "";
+  const dFrom = dateFromVal ? new Date(dateFromVal + "T00:00:00") : null;
+  const dTo = dateToVal ? new Date(dateToVal + "T23:59:59") : null;
+
+  return sessions.filter(s=>{
+    if(_maFilterTraining !== "ALL" && s.trainingId !== _maFilterTraining) return false;
+    if(searchQ && !(s.user?.name||"").toLowerCase().includes(searchQ)) return false;
+    const joinedTs = new Date(s.joinedAt);
+    if(dFrom && joinedTs < dFrom) return false;
+    if(dTo && joinedTs > dTo) return false;
+    return true;
+  });
+}
+
+function renderMeetingAttendance(){
+  const container = $("maTableContent");
+  if(!container) return;
+  const filtered = _getFilteredMeetingSessions();
+
+  if(!filtered.length){
+    container.innerHTML = `<div class="card empty" style="text-align:center;padding:30px">No meeting attendance recorded yet.</div>`;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="tablewrap" style="overflow-x:auto">
+      <table class="table">
+        <thead><tr><th>User</th><th>Employee ID</th><th>Training</th><th>Joined At</th><th>Left At</th><th>Duration</th></tr></thead>
+        <tbody>
+          ${filtered.map(s => `
+            <tr>
+              <td><b>${esc(s.user?.name||"-")}</b></td>
+              <td>${esc(s.user?.employee_id||"-")}</td>
+              <td>${esc(s.training?.title||"-")}</td>
+              <td style="white-space:nowrap">${new Date(s.joinedAt).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"})}</td>
+              <td style="white-space:nowrap">${s.leftAt ? new Date(s.leftAt).toLocaleString("en-IN",{dateStyle:"medium",timeStyle:"short"}) : '<span class="badge b">In progress / unknown</span>'}</td>
+              <td>${_maDuration(s.joinedAt, s.leftAt)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+    <p class="muted" style="font-size:12.5px;margin-top:10px">Showing ${filtered.length} session(s). "Left At" is approximate — logged when the user returns focus to STLP after joining.</p>
+  `;
+}
+
+function exportMeetingAttendanceCSV(){
+  const filtered = _getFilteredMeetingSessions();
+  if(!filtered.length) return alert("No attendance records to export for the current filters.");
+
+  let csv = "User,Employee ID,Training,Joined At,Left At,Duration\n";
+  filtered.forEach(s => {
+    const row = [
+      s.user?.name || "",
+      s.user?.employee_id || "",
+      s.training?.title || "",
+      new Date(s.joinedAt).toLocaleString("en-IN"),
+      s.leftAt ? new Date(s.leftAt).toLocaleString("en-IN") : "In progress / unknown",
+      _maDuration(s.joinedAt, s.leftAt)
+    ];
+    csv += row.map(v => `"${String(v).replace(/"/g,'""')}"`).join(",") + "\n";
+  });
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `STLP_MeetingAttendance_${Date.now()}.csv`;
+  a.click();
+}
+
 // --- TRAINERS MODULE ---
 async function trainersPage(){
   const [tr, ur] = await Promise.all([
@@ -4917,7 +5103,7 @@ async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
   currentRoute = x;
-  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage}[x] || dash)();
+  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage}[x] || dash)();
 }
 
 // --- SOP MODULE ---
