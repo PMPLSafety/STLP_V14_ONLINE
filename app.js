@@ -317,7 +317,8 @@ const MENU_ICONS = {
   dash:"📊", users:"👥", train:"📚", notes:"🔔", results:"📝",
   progress:"📈", reports:"📄", history:"🗂️", seclogs:"🔒", feedback:"💬", sop:"📁", trainers:"🎓",
   attendance:"🎥", certificates:"📜",
-  _history_group:"🕒"
+  _history_group:"🕒",
+  _settings_group:"⚙️", mailintegration:"✉️"
 };
 
 let currentRoute = "dash";
@@ -336,20 +337,25 @@ function toggleMobileSidebar(){
   $("sideScrim")?.classList.toggle("show");
 }
 
-let _sideHistoryOpen = null; // null = auto (open if a history sub-route is active)
-function toggleSideHistoryGroup(){
-  _sideHistoryOpen = !( _sideHistoryOpen === null ? true : _sideHistoryOpen );
-  route(currentRoute === "seclogs" ? "seclogs" : "history");
+let _sideGroupOpen = { _history_group: null, _settings_group: null }; // null = auto (open if a sub-route of that group is active)
+function toggleSideGroup(groupKey, fallbackRoute){
+  const cur = _sideGroupOpen[groupKey];
+  _sideGroupOpen[groupKey] = !(cur === null || cur === undefined ? true : cur);
+  const stayOnCurrent = ["history","seclogs","mailintegration"].includes(currentRoute);
+  route(stayOnCurrent ? currentRoute : fallbackRoute);
 }
+// Back-compat alias: existing History group button in the DOM/markup calls this name.
+function toggleSideHistoryGroup(){ toggleSideGroup("_history_group", "history"); }
 
 function renderSideMenu(menu, admin, active){
   return `<div class="nav">${menu.map(m => {
     const [key, label, sub] = m;
     if(sub){
       const isActiveGroup = sub.some(s => s[0] === active);
-      const open = _sideHistoryOpen === null ? isActiveGroup : _sideHistoryOpen;
+      const openState = _sideGroupOpen[key];
+      const open = (openState === null || openState === undefined) ? isActiveGroup : openState;
       return `
-        <button class="${isActiveGroup?"active":""}" data-tip="${esc(label)}" onclick="toggleSideHistoryGroup()">
+        <button class="${isActiveGroup?"active":""}" data-tip="${esc(label)}" onclick="toggleSideGroup('${key}','${sub[0][0]}')">
           <span class="ico">${MENU_ICONS[key]||"🕒"}</span><span class="lbl">${esc(label)}</span>
           <span style="margin-left:auto;font-size:11px">${open?"▾":"▸"}</span>
         </button>
@@ -368,7 +374,8 @@ function layout(active, title, html){
   let menu = admin ?
     [["dash","Dashboard"],["users","Users Management"],["train","Training"],["certificates","Certificates"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["attendance","Meeting Attendance"],
       ["_history_group","History",[["history","Audit Logs"],["seclogs","Security Logs"]]],
-      ["feedback","Feedback"]] :
+      ["feedback","Feedback"],
+      ["_settings_group","Settings",[["mailintegration","Mail Integration"]]]] :
     [["dash","Dashboard"],["train","My Trainings"],["certificates","My Certificates"],["sop","Library"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
   const collapsed = _sidebarCollapsedPref();
@@ -1154,7 +1161,7 @@ function addUserForm(){
         <div class=formgrid>
           <div><label>Employee ID *</label><input id=uid placeholder="e.g. EMP001"></div>
           <div><label>Name *</label><input id=un placeholder="Full Name"></div>
-          <div><label>Username / Email</label><input id=ue placeholder="Optional email"></div>
+          <div><label>Email Address *</label><input id=ue type="email" placeholder="e.g. ravi.kumar@company.com"></div>
           <div><label>Password *</label><input id=up type=password value="TSL@1234"></div>
           <div><label>Department</label><input id=ud placeholder="Electrical"></div>
           <div><label>Designation</label><input id=udes placeholder="Engineer"></div>
@@ -1189,14 +1196,20 @@ async function createUser(){
     return alert("Employee ID, Name and Password are required.");
   }
 
-  if(username && !validateEmail(username)){
+  if(!username){
+    return alert("Email Address is required. STLP uses this to send training, certificate and other notification emails to the employee.");
+  }
+  if(!validateEmail(username)){
     return alert("Please enter a valid email address.");
+  }
+  if(username.toLowerCase().endsWith("@tsl.internal")){
+    return alert("Please enter the employee's real email address, not a placeholder.");
   }
 
   let payload = {
     employee_id: empId,
     name: name,
-    username: username || `${empId.toLowerCase()}@tsl.internal`,
+    username: username,
     password: password,
     department: $("ud").value.trim(),
     designation: $("udes").value.trim(),
@@ -1245,6 +1258,7 @@ async function editUser(id){
         <div class=formgrid>
           <div><label>Employee ID *</label><input id=eid value="${esc(u.employee_id||"")}"></div>
           <div><label>Name *</label><input id=en value="${esc(u.name||"")}"></div>
+          <div><label>Email Address *</label><input id=eu type="email" value="${esc((u.username||"").endsWith("@tsl.internal")?"":(u.username||""))}" placeholder="e.g. ravi.kumar@company.com"></div>
           <div><label>Department</label><input id=ed value="${esc(u.department||"")}"></div>
           <div><label>Designation</label><input id=edes value="${esc(u.designation||"")}"></div>
           <div><label>Company</label><input id=ec value="${esc(u.company||"")}"></div>
@@ -1266,9 +1280,12 @@ async function editUser(id){
 }
 
 async function saveUser(id){
+  let email = $("eu").value.trim();
+
   let payload = {
     employee_id: $("eid").value.trim(),
     name: $("en").value.trim(),
+    username: email,
     department: $("ed").value.trim(),
     designation: $("edes").value.trim(),
     company: $("ec").value.trim(),
@@ -1277,6 +1294,15 @@ async function saveUser(id){
 
   if(!payload.employee_id || !payload.name){
     return alert("Employee ID and Name are required.");
+  }
+  if(!email){
+    return alert("Email Address is required. STLP uses this to send training, certificate and other notification emails to the employee.");
+  }
+  if(!validateEmail(email)){
+    return alert("Please enter a valid email address.");
+  }
+  if(email.toLowerCase().endsWith("@tsl.internal")){
+    return alert("Please enter the employee's real email address, not a placeholder.");
   }
 
   let r = await sb.from("profiles").update(payload).eq("id", id);
@@ -1352,6 +1378,7 @@ function importExcelModal(){
       <div class="modal">
         <h2>📥 Import Employees from Excel</h2>
         <p class="muted">File must use the exact format produced by Export User Details.</p>
+        <p class="muted" style="margin-top:-8px">⚠️ <b>Username/Email</b> is mandatory for every row — STLP uses it to send training, certificate and other notification emails.</p>
         <div style="margin:20px 0">
           <label>Select Excel File</label>
           <input type="file" id="excelfile" accept=".xlsx, .xls, .csv">
@@ -1500,10 +1527,22 @@ async function executeExcelImport(){
       let empKey = empId.toLowerCase();
       let emailKey = emailVal.toLowerCase();
 
-      if(emailVal && !validateEmail(emailVal)){
+      if(!emailVal){
+        invalidEmailCount++;
+        failedCount++;
+        rowDetails.push(`Row ${rowNum} (${empId}): Email Address is required (used for training/certificate notification emails).`);
+        continue;
+      }
+      if(!validateEmail(emailVal)){
         invalidEmailCount++;
         failedCount++;
         rowDetails.push(`Row ${rowNum} (${empId}): Invalid email format '${emailVal}'.`);
+        continue;
+      }
+      if(emailKey.endsWith("@tsl.internal")){
+        invalidEmailCount++;
+        failedCount++;
+        rowDetails.push(`Row ${rowNum} (${empId}): Please provide the employee's real email address, not a placeholder.`);
         continue;
       }
 
@@ -1522,7 +1561,7 @@ async function executeExcelImport(){
       processedEmpIds.add(empKey);
       if(emailKey) processedEmails.add(emailKey);
 
-      let targetEmail = emailVal ? emailVal : `${empKey}@tsl.internal`;
+      let targetEmail = emailVal;
       let existingId = existingEmpMap[empKey] || (emailKey ? existingEmailMap[emailKey] : null);
 
       if(existingId){
@@ -3147,6 +3186,18 @@ async function submitAssessment(trainingId){
   const d = res.data;
   closeModal();
 
+  if(d.passed){
+    // Additive, non-blocking: email the employee that their certificate is ready.
+    sb.from("trainings").select("title").eq("id", trainingId).single().then(tr => {
+      notifyByEmail(
+        "certificate_issued",
+        profile.id,
+        "Certificate Available — STLP",
+        `Congratulations! You scored ${d.score}% and passed "${tr.data?.title || "your training"}". Your certificate of completion is now available in STLP under "My Certificates".`
+      );
+    });
+  }
+
   document.body.insertAdjacentHTML("beforeend", `
     <div class="modalbg" id="modal">
       <div class="modal" style="max-width:650px;text-align:center">
@@ -3574,6 +3625,10 @@ async function addNotificationForm(){
             </label>`).join("") : '<span class="muted" style="font-size:12.5px">No departments found yet — add users with a Department first.</span>'}
         </div>
       </div>
+      <div class="fullfield" style="margin-top:10px;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="nSendEmail" style="width:auto">
+        <label style="margin:0;font-weight:600" for="nSendEmail">Also send by email</label>
+      </div>
       <div class="actions" style="margin-top:15px"><button class="btn blue" onclick="saveNotification()">Publish</button><button class="btn light" onclick="closeModal()">Cancel</button></div>
     </div></div>
   `);
@@ -3582,11 +3637,28 @@ async function addNotificationForm(){
 async function saveNotification(){
   const deptAll = $("ndeptAll")?.checked;
   const selectedDepts = Array.from(document.querySelectorAll(".ndept-chk:checked")).map(c=>c.value);
+  const sendEmail = $("nSendEmail")?.checked;
+  const title = $("ntitle").value.trim();
+  const message = $("nmsg").value.trim();
+
   await sb.from("notifications").insert({
-    title: $("ntitle").value.trim(),
-    message: $("nmsg").value.trim(),
+    title,
+    message,
     target_departments: deptAll ? null : (selectedDepts.length ? selectedDepts : null)
   });
+
+  if(sendEmail){
+    // Additive, non-blocking: fan out to matching active employees by email too.
+    try{
+      let q = sb.from("profiles").select("id").eq("role","user").eq("active", true);
+      if(!deptAll && selectedDepts.length) q = q.in("department", selectedDepts);
+      const usersRes = await q;
+      (usersRes.data || []).forEach(u => {
+        notifyByEmail("manual_notification", u.id, title, message);
+      });
+    }catch(e){ /* non-blocking */ }
+  }
+
   closeModal();
   notifications();
 }
@@ -3600,11 +3672,29 @@ async function notifyNewTrainingAvailable(trainingTitle, targetDepartments){
   const deptNote = (targetDepartments && targetDepartments.length)
     ? ` (for ${targetDepartments.join(", ")})`
     : "";
-  return sb.from("notifications").insert({
+  const r = await sb.from("notifications").insert({
     title: "New Training Assigned",
     message: `A new training "${trainingTitle}" has been added${deptNote}. Open "My Trainings" to view and complete it.`,
     target_departments: (targetDepartments && targetDepartments.length) ? targetDepartments : null
   });
+
+  // Additive: also email every targeted (active) employee. Best-effort —
+  // never blocks/undoes the in-app notification above if email fails.
+  try{
+    let q = sb.from("profiles").select("id").eq("role","user").eq("active", true);
+    if(targetDepartments && targetDepartments.length) q = q.in("department", targetDepartments);
+    const usersRes = await q;
+    (usersRes.data || []).forEach(u => {
+      notifyByEmail(
+        "training_assigned",
+        u.id,
+        "New Training Assigned — STLP",
+        `A new training "${trainingTitle}" has been assigned to you. Please log in to STLP and open "My Trainings" to view and complete it.`
+      );
+    });
+  }catch(e){ /* non-blocking */ }
+
+  return r;
 }
 
 // --- WEB PUSH SUBSCRIPTION (iOS 16.4+ requires "Add to Home Screen" first) ---
@@ -5183,7 +5273,7 @@ async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
   currentRoute = x;
-  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage, certificates:certificatesPage}[x] || dash)();
+  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage, certificates:certificatesPage, mailintegration:mailIntegrationPage}[x] || dash)();
 }
 
 // --- SOP MODULE ---
@@ -5432,6 +5522,224 @@ async function rejectSop(id){
   }).eq("id", id);
   if(r.error) return alert(r.error.message);
   route("sop");
+}
+
+// ============================================================================
+// MAIL INTEGRATION (Settings > Mail Integration) — STLP V15
+// Google Workspace/Gmail OAuth2 email notifications.
+// This module ONLY talks to Supabase Edge Functions below — it never touches
+// OAuth Client Secrets, access tokens, or refresh tokens directly. Those stay
+// server-side. See mail_integration_setup.sql and /supabase-functions/mail-*.
+// ============================================================================
+
+async function _mailFn(name, opts){
+  const s = (await sb.auth.getSession()).data.session;
+  if(!s) throw new Error("Session expired. Please login again.");
+  const r = await fetch(`${window.SUPABASE_URL}/functions/v1/${name}`, {
+    method: opts?.method || "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + s.access_token,
+      "apikey": window.SUPABASE_ANON_KEY
+    },
+    body: opts?.body ? JSON.stringify(opts.body) : undefined
+  });
+  const text = await r.text().catch(()=>"");
+  let d = {};
+  try { d = text ? JSON.parse(text) : {}; } catch(e) {}
+  if(!r.ok) throw new Error(d.error || d.message || `Request failed (${r.status})`);
+  return d;
+}
+
+async function mailIntegrationPage(){
+  if(profile.role !== "admin"){
+    return layout("mailintegration","Mail Integration",`<div class="card"><b>Access denied.</b> Only STLP Admin can manage Mail Integration.</div>`);
+  }
+
+  let status;
+  try{
+    status = await _mailFn("mail-status", { method: "GET" });
+  }catch(e){
+    return layout("mailintegration","Mail Integration",`<div class="card"><b>Error:</b> ${esc(e.message)}<br><span class="muted" style="font-size:13px">Make sure the mail-status Edge Function is deployed in Supabase.</span></div>`);
+  }
+
+  window._mailStatusCache = status;
+
+  const statusCard = !status.configured ? `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <b>🔴 Mail Not Connected</b>
+      <p class="muted" style="margin-top:6px">Automatic email notifications are currently unavailable. Set up the Google connection below to enable them.</p>
+    </div>
+  ` : !status.connected ? `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <b>🔴 Mail Not Connected</b>
+      <p class="muted" style="margin-top:6px">Google credentials are saved. Click "Connect Google Workspace Mail" below to authorize an account.</p>
+    </div>
+  ` : `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <b>${status.notifications_enabled ? "🟢 Mail Connected" : "🟡 Mail Connected"}</b>
+      <div style="margin-top:8px;font-size:14px;line-height:1.8">
+        <div><b>Connected Account:</b> ${esc(status.connected_email)}</div>
+        <div><b>Provider:</b> Google Workspace / Gmail</div>
+        <div><b>Permission:</b> Send Email (gmail.send)</div>
+        <div><b>Notifications:</b> ${status.notifications_enabled ? "ON" : "OFF"}</div>
+      </div>
+    </div>
+  `;
+
+  const step1Card = `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <h3 style="margin:0 0 4px;font-size:16px">Step 1 — Google OAuth Credentials ${status.configured ? "✅" : ""}</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:12px">One-time setup. Paste the Client ID and Client Secret generated in Google Cloud Console (APIs &amp; Services → Credentials). This is saved encrypted on the server — it is never shown again in full.</p>
+      <div class="formgrid">
+        <div><label>Google Client ID *</label><input id="mailClientId" placeholder="xxxx.apps.googleusercontent.com" value="${status.configured ? "" : ""}"></div>
+        <div><label>Google Client Secret *</label><input id="mailClientSecret" type="password" placeholder="${status.configured ? "•••••••• (saved — leave blank to keep)" : "GOCSPX-..."}"></div>
+        <div class="fullfield">
+          <label>Authorized Redirect URI (copy this into Google Cloud Console → Credentials)</label>
+          <input id="mailRedirectUri" readonly value="${esc(status.redirect_uri || (window.SUPABASE_URL + "/functions/v1/mail-oauth-callback"))}" onclick="this.select()">
+        </div>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn blue" onclick="saveMailConfig()">💾 Save Configuration</button>
+      </div>
+    </div>
+  `;
+
+  const step2Card = `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <h3 style="margin:0 0 4px;font-size:16px">Step 2 — Connect Account</h3>
+      <div class="actions" style="margin-top:8px;flex-wrap:wrap;gap:8px">
+        <button class="btn blue" ${!status.configured?"disabled style=\"opacity:.5\"":""} onclick="connectGoogleMail()">🔗 ${status.connected ? "Change / Reconnect Account" : "Connect Google Workspace Mail"}</button>
+        ${status.connected ? `<button class="btn light" onclick="toggleMailNotifications(${!status.notifications_enabled})">${status.notifications_enabled ? "⏸ Turn Notifications OFF" : "▶️ Turn Notifications ON"}</button>` : ""}
+        ${status.connected ? `<button class="btn light" onclick="openTestEmailModal()">✉️ Test Email</button>` : ""}
+        ${status.connected ? `<button class="btn light" style="color:#d32f2f" onclick="confirmDisconnectMail()">🗑️ Remove Configuration</button>` : ""}
+      </div>
+    </div>
+  `;
+
+  layout("mailintegration","Mail Integration",`
+    <p class="muted" style="margin:-6px 0 16px">Settings &nbsp;›&nbsp; Mail Integration — automatic email notifications sent from your Google Workspace/Gmail account for training, certificate and safety events.</p>
+    ${statusCard}
+    ${step1Card}
+    ${step2Card}
+  `);
+}
+
+async function saveMailConfig(){
+  const clientId = $("mailClientId").value.trim();
+  const clientSecret = $("mailClientSecret").value.trim();
+  const redirectUri = $("mailRedirectUri").value.trim();
+
+  if(!clientId || !redirectUri){
+    return alert("Client ID is required.");
+  }
+  if(!clientSecret && !(window._mailStatusCache && window._mailStatusCache.configured)){
+    return alert("Client Secret is required for first-time setup.");
+  }
+  if(!clientSecret){
+    return alert("Enter the Client Secret again to update the configuration (it cannot be pre-filled for security reasons).");
+  }
+
+  try{
+    await _mailFn("mail-config", { body: { client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri } });
+    alert("Configuration saved.");
+    route("mailintegration");
+  }catch(e){
+    alert("Could not save configuration: " + e.message);
+  }
+}
+
+async function connectGoogleMail(){
+  try{
+    const r = await _mailFn("mail-oauth-start", { method: "GET" });
+    if(!r.url) throw new Error("No authorization URL returned.");
+    window.location.href = r.url; // hands off to Google's consent screen
+  }catch(e){
+    alert("Could not start Google authorization: " + e.message);
+  }
+}
+
+async function toggleMailNotifications(enabled){
+  try{
+    await _mailFn("mail-toggle", { body: { enabled } });
+    route("mailintegration");
+  }catch(e){
+    alert("Could not update notification setting: " + e.message);
+  }
+}
+
+function confirmDisconnectMail(){
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:450px">
+        <h2>Remove Mail Integration?</h2>
+        <p class="muted">This will stop STLP automatic email notifications until a new mail account is connected.</p>
+        <div class="actions" style="justify-content:flex-end;margin-top:16px">
+          <button class="btn light" onclick="closeModal()">Cancel</button>
+          <button class="btn light" style="color:#d32f2f" onclick="executeDisconnectMail()">Remove</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function executeDisconnectMail(){
+  try{
+    await _mailFn("mail-disconnect");
+    closeModal();
+    alert("Mail Integration removed.");
+    route("mailintegration");
+  }catch(e){
+    alert("Could not remove Mail Integration: " + e.message);
+  }
+}
+
+function openTestEmailModal(){
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:450px">
+        <h2>Send Test Email</h2>
+        <div class="formgrid">
+          <div class="fullfield"><label>Recipient</label><input id="mailTestRecipient" type="email" placeholder="you@company.com"></div>
+        </div>
+        <div class="actions" style="justify-content:flex-end;margin-top:16px">
+          <button class="btn light" onclick="closeModal()">Cancel</button>
+          <button class="btn blue" onclick="sendTestMail()">Send Test Email</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function sendTestMail(){
+  const to = $("mailTestRecipient").value.trim();
+  if(!to || !validateEmail(to)) return alert("Please enter a valid email address.");
+  try{
+    await _mailFn("mail-test", { body: { recipient: to } });
+    closeModal();
+    alert("✓ Test email sent successfully.");
+  }catch(e){
+    alert("Could not send test email: " + e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Central notification-email helper. Existing STLP modules call this AFTER
+// their normal database action succeeds. It never throws to the caller and
+// never blocks the underlying STLP action — email failures are logged
+// server-side (mail_log table) and swallowed here.
+// eventType must be one of: training_assigned | training_completed |
+// certificate_issued | manual_notification
+// ---------------------------------------------------------------------------
+async function notifyByEmail(eventType, recipientProfileId, subject, message){
+  try{
+    if(!recipientProfileId || !subject) return;
+    await _mailFn("mail-send", {
+      body: { event_type: eventType, recipient_profile_id: recipientProfileId, subject, message }
+    });
+  }catch(e){
+    console.warn("Email notification skipped/failed (non-blocking):", e.message);
+  }
 }
 
 (async()=>{
