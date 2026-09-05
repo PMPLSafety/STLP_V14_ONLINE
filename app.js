@@ -5587,6 +5587,29 @@ async function mailIntegrationPage(){
     </div>
   `;
 
+  const redirectUriValue = esc(status.redirect_uri || (window.SUPABASE_URL + "/functions/v1/mail-oauth-callback"));
+
+  const howToCard = `
+    <div class="card" style="padding:16px;margin-bottom:16px;background:#f7f9fc">
+      <details>
+        <summary style="cursor:pointer;font-weight:600;font-size:14px">📘 How to get your Google Client ID &amp; Client Secret (click to expand)</summary>
+        <ol style="margin:12px 0 4px;padding-left:20px;font-size:13px;line-height:1.7">
+          <li>Go to <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a> and sign in with the Google Workspace account you want to send emails from (e.g. your organisation's account).</li>
+          <li>Create a new Project (or pick an existing one) from the project dropdown at the top.</li>
+          <li>Go to <b>APIs &amp; Services → Library</b>, search for <b>Gmail API</b> and click <b>Enable</b>.</li>
+          <li>Go to <b>APIs &amp; Services → OAuth consent screen</b>. Choose <b>Internal</b> (if using Google Workspace) or <b>External</b>, fill the required app name/email fields, and save.</li>
+          <li>Go to <b>APIs &amp; Services → Credentials → Create Credentials → OAuth client ID</b>. Choose Application type <b>Web application</b>.</li>
+          <li>Under <b>Authorized redirect URIs</b>, click <b>Add URI</b> and paste this exact link:
+            <div style="margin:6px 0"><input readonly value="${redirectUriValue}" onclick="this.select()" style="width:100%;font-size:12px"></div>
+          </li>
+          <li>Click <b>Create</b>. Google will show a <b>Client ID</b> and <b>Client Secret</b> — copy both.</li>
+          <li>Paste them into the two fields below and click <b>Save Configuration</b>, then click <b>Connect Google Workspace Mail</b> in Step 2 and sign in with the same account.</li>
+        </ol>
+        <p class="muted" style="font-size:12px;margin-top:8px">Note: these credentials belong to whichever Google account creates them — that account's mailbox will be used to send all notification emails.</p>
+      </details>
+    </div>
+  `;
+
   const step1Card = `
     <div class="card" style="padding:16px;margin-bottom:16px">
       <h3 style="margin:0 0 4px;font-size:16px">Step 1 — Google OAuth Credentials ${status.configured ? "✅" : ""}</h3>
@@ -5596,7 +5619,7 @@ async function mailIntegrationPage(){
         <div><label>Google Client Secret *</label><input id="mailClientSecret" type="password" placeholder="${status.configured ? "•••••••• (saved — leave blank to keep)" : "GOCSPX-..."}"></div>
         <div class="fullfield">
           <label>Authorized Redirect URI (copy this into Google Cloud Console → Credentials)</label>
-          <input id="mailRedirectUri" readonly value="${esc(status.redirect_uri || (window.SUPABASE_URL + "/functions/v1/mail-oauth-callback"))}" onclick="this.select()">
+          <input id="mailRedirectUri" readonly value="${redirectUriValue}" onclick="this.select()">
         </div>
       </div>
       <div class="actions" style="margin-top:12px">
@@ -5619,6 +5642,7 @@ async function mailIntegrationPage(){
 
   layout("mailintegration","Mail Integration",`
     <p class="muted" style="margin:-6px 0 16px">Settings &nbsp;›&nbsp; Mail Integration — automatic email notifications sent from your Google Workspace/Gmail account for training, certificate and safety events.</p>
+    ${howToCard}
     ${statusCard}
     ${step1Card}
     ${step2Card}
