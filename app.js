@@ -318,7 +318,7 @@ const MENU_ICONS = {
   progress:"📈", reports:"📄", history:"🗂️", seclogs:"🔒", feedback:"💬", sop:"📁", trainers:"🎓",
   attendance:"🎥", certificates:"📜",
   _history_group:"🕒",
-  _settings_group:"⚙️", mailintegration:"✉️"
+  _settings_group:"⚙️", mailintegration:"✉️", meetintegration:"🎥"
 };
 
 let currentRoute = "dash";
@@ -341,7 +341,7 @@ let _sideGroupOpen = { _history_group: null, _settings_group: null }; // null = 
 function toggleSideGroup(groupKey, fallbackRoute){
   const cur = _sideGroupOpen[groupKey];
   _sideGroupOpen[groupKey] = !(cur === null || cur === undefined ? true : cur);
-  const stayOnCurrent = ["history","seclogs","mailintegration"].includes(currentRoute);
+  const stayOnCurrent = ["history","seclogs","mailintegration","meetintegration"].includes(currentRoute);
   route(stayOnCurrent ? currentRoute : fallbackRoute);
 }
 // Back-compat alias: existing History group button in the DOM/markup calls this name.
@@ -375,7 +375,7 @@ function layout(active, title, html){
     [["dash","Dashboard"],["users","Users Management"],["train","Training"],["certificates","Certificates"],["sop","Library"],["trainers","Trainers"],["notes","Notifications"],["results","Results"],["progress","Progress"],["reports","Reports"],["attendance","Meeting Attendance"],
       ["_history_group","History",[["history","Audit Logs"],["seclogs","Security Logs"]]],
       ["feedback","Feedback"],
-      ["_settings_group","Settings",[["mailintegration","Mail Integration"]]]] :
+      ["_settings_group","Settings",[["mailintegration","Mail Integration"],["meetintegration","Meet Integration"]]]] :
     [["dash","Dashboard"],["train","My Trainings"],["certificates","My Certificates"],["sop","Library"],["notes","Notifications"],["results","Assessments"],["history","History"]];
 
   const collapsed = _sidebarCollapsedPref();
@@ -2368,14 +2368,14 @@ async function generateGoogleMeetLink(){
   try{
     const s = (await sb.auth.getSession()).data.session;
     if(!s){ alert("Session expired. Please log in again."); return; }
-    const r = await fetch(`${window.SUPABASE_URL}/functions/v1/google-meet-oauth?action=create`, {
+    const r = await fetch(`${window.SUPABASE_URL}/functions/v1/meet-create`, {
       method: "POST",
-      headers: { "Content-Type":"application/json", "Authorization":"Bearer "+s.access_token },
-      body: JSON.stringify({ title: titleVal })
+      headers: { "Content-Type":"application/json", "Authorization":"Bearer "+s.access_token, "apikey": window.SUPABASE_ANON_KEY },
+      body: JSON.stringify({ summary: titleVal })
     });
     const data = await r.json();
     if(!r.ok || !data.success || !data.meetingUri){
-      alert("Could not generate Meet link: " + (data.error || "Unknown error"));
+      alert("Could not generate Meet link: " + (data.error || "Unknown error") + (data.error && data.error.includes("not connected") ? "\n\nGo to Settings → Meet Integration and connect a Google account first." : ""));
       return;
     }
     input.value = data.meetingUri;
@@ -2451,7 +2451,7 @@ async function trainingForm(id, presetDate){
               <input id="tmeet" value="${esc(t.meet_link||"")}" placeholder="https://meet.google.com/xxx-xxxx-xxx" style="flex:1">
               <button type="button" class="btn light" id="tmeetGenBtn" style="white-space:nowrap" onclick="generateGoogleMeetLink()">🎥 Generate New Link</button>
             </div>
-            <span class="muted" style="font-size:11.5px;display:block;margin-top:4px">Generates a live Google Meet link via STLP's connected Google account (Admin only).</span>
+            <span class="muted" style="font-size:11.5px;display:block;margin-top:4px">Generates a live Google Meet link via the Google account connected in Settings → Meet Integration (Admin only).</span>
           </div>
           <div>
             <label>Assessment Required</label>
@@ -5273,7 +5273,7 @@ async function route(x){
   if(!configured) return loginPage();
   if(!profile) return start();
   currentRoute = x;
-  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage, certificates:certificatesPage, mailintegration:mailIntegrationPage}[x] || dash)();
+  return ({dash, users, train:training, sop:sopPage, trainers:trainersPage, notes:notifications, results:assessmentResults, progress, reports, history, seclogs:securityLogsPage, feedback:feedbackPage, attendance:meetingAttendancePage, certificates:certificatesPage, mailintegration:mailIntegrationPage, meetintegration:meetIntegrationPage}[x] || dash)();
 }
 
 // --- SOP MODULE ---
@@ -5763,6 +5763,170 @@ async function notifyByEmail(eventType, recipientProfileId, subject, message){
     });
   }catch(e){
     console.warn("Email notification skipped/failed (non-blocking):", e.message);
+  }
+}
+
+// ============================================================================
+// MEET INTEGRATION (Settings > Meet Integration)
+// Lets the client connect their OWN Google account (Calendar API, scope
+// calendar.events) so that "Generate New Link" on the Training form creates
+// a live Google Meet link through THEIR account — not a developer/personal
+// account. Reuses the same _mailFn() request helper (it is generic).
+// See meet_integration_setup.sql and /supabase-functions/meet-*.
+// ============================================================================
+
+async function meetIntegrationPage(){
+  if(profile.role !== "admin"){
+    return layout("meetintegration","Meet Integration",`<div class="card"><b>Access denied.</b> Only STLP Admin can manage Meet Integration.</div>`);
+  }
+
+  let status;
+  try{
+    status = await _mailFn("meet-status", { method: "GET" });
+  }catch(e){
+    return layout("meetintegration","Meet Integration",`<div class="card"><b>Error:</b> ${esc(e.message)}<br><span class="muted" style="font-size:13px">Make sure the meet-status Edge Function is deployed in Supabase.</span></div>`);
+  }
+
+  window._meetStatusCache = status;
+
+  const statusCard = !status.configured ? `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <b>🔴 Meet Not Connected</b>
+      <p class="muted" style="margin-top:6px">Live Google Meet link generation is currently unavailable. Set up the Google connection below to enable it.</p>
+    </div>
+  ` : !status.connected ? `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <b>🔴 Meet Not Connected</b>
+      <p class="muted" style="margin-top:6px">Google credentials are saved. Click "Connect Google Account" below to authorize an account.</p>
+    </div>
+  ` : `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <b>🟢 Meet Connected</b>
+      <div style="margin-top:8px;font-size:14px;line-height:1.8">
+        <div><b>Connected Account:</b> ${esc(status.connected_email)}</div>
+        <div><b>Provider:</b> Google Calendar / Meet</div>
+        <div><b>Permission:</b> Create Calendar Events (calendar.events)</div>
+      </div>
+    </div>
+  `;
+
+  const redirectUriValue = esc(status.redirect_uri || (window.SUPABASE_URL + "/functions/v1/meet-oauth-callback"));
+
+  const howToCard = `
+    <div class="card" style="padding:16px;margin-bottom:16px;background:#f7f9fc">
+      <details>
+        <summary style="cursor:pointer;font-weight:600;font-size:14px">📘 How to get your Google Client ID &amp; Client Secret (click to expand)</summary>
+        <ol style="margin:12px 0 4px;padding-left:20px;font-size:13px;line-height:1.7">
+          <li>Go to <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a> and sign in with the Google account you want to generate Meet links from.</li>
+          <li>Create a new Project (or pick an existing one) from the project dropdown at the top. <span class="muted">(You can reuse the same project as Mail Integration if you already made one.)</span></li>
+          <li>Go to <b>APIs &amp; Services → Library</b>, search for <b>Google Calendar API</b> and click <b>Enable</b>.</li>
+          <li>Go to <b>APIs &amp; Services → OAuth consent screen</b>. Choose <b>Internal</b> (if using Google Workspace) or <b>External</b>, fill the required app name/email fields, and save.</li>
+          <li>Go to <b>APIs &amp; Services → Credentials → Create Credentials → OAuth client ID</b>. Choose Application type <b>Web application</b>. (You may reuse the same OAuth Client as Mail Integration, or create a separate one.)</li>
+          <li>Under <b>Authorized redirect URIs</b>, click <b>Add URI</b> and paste this exact link:
+            <div style="margin:6px 0"><input readonly value="${redirectUriValue}" onclick="this.select()" style="width:100%;font-size:12px"></div>
+          </li>
+          <li>Click <b>Create</b> (or <b>Save</b> if reusing an existing client). Copy the <b>Client ID</b> and <b>Client Secret</b>.</li>
+          <li>Paste them into the two fields below and click <b>Save Configuration</b>, then click <b>Connect Google Account</b> in Step 2 and sign in with the account whose calendar/Meet you want to use.</li>
+        </ol>
+        <p class="muted" style="font-size:12px;margin-top:8px">Note: whichever Google account is connected here is the account that will own every generated Meet link.</p>
+      </details>
+    </div>
+  `;
+
+  const step1Card = `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <h3 style="margin:0 0 4px;font-size:16px">Step 1 — Google OAuth Credentials ${status.configured ? "✅" : ""}</h3>
+      <p class="muted" style="font-size:13px;margin-bottom:12px">One-time setup. Paste the Client ID and Client Secret generated in Google Cloud Console (APIs &amp; Services → Credentials). This is saved encrypted on the server — it is never shown again in full.</p>
+      <div class="formgrid">
+        <div><label>Google Client ID *</label><input id="meetClientId" placeholder="xxxx.apps.googleusercontent.com"></div>
+        <div><label>Google Client Secret *</label><input id="meetClientSecret" type="password" placeholder="${status.configured ? "•••••••• (saved — leave blank to keep)" : "GOCSPX-..."}"></div>
+        <div class="fullfield">
+          <label>Authorized Redirect URI (copy this into Google Cloud Console → Credentials)</label>
+          <input id="meetRedirectUri" readonly value="${redirectUriValue}" onclick="this.select()">
+        </div>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn blue" onclick="saveMeetConfig()">💾 Save Configuration</button>
+      </div>
+    </div>
+  `;
+
+  const step2Card = `
+    <div class="card" style="padding:16px;margin-bottom:16px">
+      <h3 style="margin:0 0 4px;font-size:16px">Step 2 — Connect Account</h3>
+      <div class="actions" style="margin-top:8px;flex-wrap:wrap;gap:8px">
+        <button class="btn blue" ${!status.configured?"disabled style=\"opacity:.5\"":""} onclick="connectGoogleMeet()">🔗 ${status.connected ? "Change / Reconnect Account" : "Connect Google Account"}</button>
+        ${status.connected ? `<button class="btn light" style="color:#d32f2f" onclick="confirmDisconnectMeet()">🗑️ Remove Configuration</button>` : ""}
+      </div>
+    </div>
+  `;
+
+  layout("meetintegration","Meet Integration",`
+    <p class="muted" style="margin:-6px 0 16px">Settings &nbsp;›&nbsp; Meet Integration — generate live Google Meet links (for Training) through your own connected Google account.</p>
+    ${howToCard}
+    ${statusCard}
+    ${step1Card}
+    ${step2Card}
+  `);
+}
+
+async function saveMeetConfig(){
+  const clientId = $("meetClientId").value.trim();
+  const clientSecret = $("meetClientSecret").value.trim();
+  const redirectUri = $("meetRedirectUri").value.trim();
+
+  if(!clientId || !redirectUri){
+    return alert("Client ID is required.");
+  }
+  if(!clientSecret && !(window._meetStatusCache && window._meetStatusCache.configured)){
+    return alert("Client Secret is required for first-time setup.");
+  }
+  if(!clientSecret){
+    return alert("Enter the Client Secret again to update the configuration (it cannot be pre-filled for security reasons).");
+  }
+
+  try{
+    await _mailFn("meet-config", { body: { client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri } });
+    alert("Configuration saved.");
+    route("meetintegration");
+  }catch(e){
+    alert("Could not save configuration: " + e.message);
+  }
+}
+
+async function connectGoogleMeet(){
+  try{
+    const r = await _mailFn("meet-oauth-start", { method: "GET" });
+    if(!r.url) throw new Error("No authorization URL returned.");
+    window.location.href = r.url; // hands off to Google's consent screen
+  }catch(e){
+    alert("Could not start Google authorization: " + e.message);
+  }
+}
+
+function confirmDisconnectMeet(){
+  document.body.insertAdjacentHTML("beforeend", `
+    <div class="modalbg" id="modal">
+      <div class="modal" style="max-width:450px">
+        <h2>Remove Meet Integration?</h2>
+        <p class="muted">This will stop live Meet link generation until a new Google account is connected.</p>
+        <div class="actions" style="justify-content:flex-end;margin-top:16px">
+          <button class="btn light" onclick="closeModal()">Cancel</button>
+          <button class="btn light" style="color:#d32f2f" onclick="executeDisconnectMeet()">Remove</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+async function executeDisconnectMeet(){
+  try{
+    await _mailFn("meet-disconnect", { body: { full_reset: false } });
+    closeModal();
+    alert("Meet Integration disconnected.");
+    route("meetintegration");
+  }catch(e){
+    alert("Could not remove Meet Integration: " + e.message);
   }
 }
 
